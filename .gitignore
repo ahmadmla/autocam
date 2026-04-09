@@ -1,0 +1,13 @@
+__pycache__/
+.venv/
+
+*.pyc
+.env
+history.json
+central_history.json
+central_pose_logger_output.txt
+central_raw_input_log.txt
+*_node_sender_log.txt
+*_raw_serial_output.txt
+
+.DS_Store

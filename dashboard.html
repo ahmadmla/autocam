@@ -1,0 +1,1170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>UWB Multi-Node Dashboard</title>
+  <style>
+    :root {
+      --bg: #f6f7fb;
+      --card: #ffffff;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --line: #e5e7eb;
+      --accent: #111827;
+      --anchor: #2563eb;
+      --outline: #6366f1;
+      --danger: #dc2626;
+      --shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+      --radius: 18px;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      padding: 24px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, Arial, sans-serif;
+    }
+
+    .wrap {
+      max-width: 1440px;
+      margin: 0 auto;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 30px;
+      line-height: 1.15;
+    }
+
+    .sub {
+      margin: 0 0 22px;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.3fr) minmax(340px, 420px);
+      gap: 20px;
+      align-items: start;
+    }
+
+    .card {
+      background: var(--card);
+      border-radius: var(--radius);
+      padding: 18px;
+      box-shadow: var(--shadow);
+    }
+
+    svg {
+      width: 100%;
+      height: auto;
+      display: block;
+      border-radius: 14px;
+      background: white;
+    }
+
+    .row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    button,
+    select,
+    input {
+      font: inherit;
+      border-radius: 12px;
+      border: 1px solid #d1d5db;
+      padding: 10px 12px;
+      background: white;
+      color: var(--text);
+    }
+
+    button {
+      cursor: pointer;
+      background: var(--accent);
+      color: white;
+      border: none;
+    }
+
+    button:hover { opacity: 0.94; }
+    button:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    input[type="range"] {
+      width: 100%;
+      padding: 0;
+      border: none;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin: 12px 0 16px;
+    }
+
+    .stat {
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fafafa;
+    }
+
+    .stat-label {
+      display: block;
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .stat-value {
+      font-size: 16px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    .section-title {
+      margin: 18px 0 8px;
+      font-size: 14px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .legend,
+    .node-legend {
+      display: flex;
+      gap: 14px;
+      flex-wrap: wrap;
+      margin-top: 12px;
+      font-size: 14px;
+      color: #4b5563;
+    }
+
+    .dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 999px;
+      display: inline-block;
+      margin-right: 6px;
+      vertical-align: middle;
+      flex: 0 0 auto;
+    }
+
+    .node-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .node-item {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 12px;
+      background: #fafafa;
+      display: grid;
+      gap: 6px;
+    }
+
+    .node-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .node-name {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 700;
+    }
+
+    .node-meta,
+    .helper {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      padding: 5px 10px;
+      background: #eef2ff;
+      color: #3730a3;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .timeline-wrap {
+      margin: 8px 0 16px;
+    }
+
+    .footer-note {
+      margin-top: 16px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .empty {
+      color: var(--muted);
+      font-size: 14px;
+      padding: 12px;
+      border: 1px dashed var(--line);
+      border-radius: 14px;
+      background: #fafafa;
+    }
+
+    @media (max-width: 1024px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>UWB Multi-Node Dashboard</h1>
+    <p class="sub">Watches <span class="mono">central_history.json</span> first, falls back to <span class="mono">history.json</span>, groups entries by <span class="mono">node_id</span>, and stays resilient when the logger is in the middle of rewriting JSON instead of pretending the whole app is broken.</p>
+
+    <div class="grid">
+      <div class="card">
+        <svg id="viz" viewBox="0 0 980 780" aria-label="UWB multi-node visualization"></svg>
+        <div class="legend">
+          <div><span class="dot" style="background:#2563eb"></span>Anchors</div>
+          <div><span class="dot" style="background:#6366f1"></span>Anchor footprint</div>
+          <div><span class="dot" style="background:#f59e0b"></span>History trails</div>
+          <div><span class="dot" style="background:#dc2626"></span>Current position</div>
+        </div>
+        <div id="nodeLegend" class="node-legend"></div>
+      </div>
+
+      <div class="card">
+        <div class="row">
+          <button id="liveBtn">Start auto watch</button>
+          <button id="stopLiveBtn">Stop auto watch</button>
+          <button id="reloadBtn">Reload now</button>
+        </div>
+
+        <div class="row">
+          <button id="playBtn">Play selected history</button>
+          <button id="pauseBtn">Pause</button>
+          <button id="clearBtn">Clear local trails</button>
+        </div>
+
+        <div class="row">
+          <label class="helper" for="nodeSelect">Node view</label>
+          <select id="nodeSelect">
+            <option value="__all__">All nodes</option>
+          </select>
+          <input id="filePicker" type="file" accept="application/json" />
+        </div>
+
+        <div class="stats">
+          <div class="stat"><span class="stat-label">Status</span><span id="status" class="stat-value">idle</span></div>
+          <div class="stat"><span class="stat-label">Source</span><span id="sourceOut" class="stat-value">waiting</span></div>
+          <div class="stat"><span class="stat-label">Anchor profile</span><span id="profileOut" class="stat-value">BED</span></div>
+          <div class="stat"><span class="stat-label">Nodes loaded</span><span id="nodeCountOut" class="stat-value">0</span></div>
+          <div class="stat"><span class="stat-label">Selected X</span><span id="xOut" class="stat-value">0.000</span></div>
+          <div class="stat"><span class="stat-label">Selected Y</span><span id="yOut" class="stat-value">0.000</span></div>
+          <div class="stat"><span class="stat-label">Frames</span><span id="frameOut" class="stat-value">0 / 0</span></div>
+          <div class="stat"><span class="stat-label">Timestamp</span><span id="timeOut" class="stat-value">n/a</span></div>
+        </div>
+
+        <div class="timeline-wrap">
+          <div class="row" style="margin-bottom: 6px;">
+            <span class="pill">Timeline scrubber</span>
+            <span id="timelineHint" class="helper">Pick one node to scrub or play history.</span>
+          </div>
+          <input id="timeline" type="range" min="0" max="0" value="0" step="1" />
+        </div>
+
+        <div class="section-title">Latest node snapshots</div>
+        <div id="nodeList" class="node-list"></div>
+
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const svg = document.getElementById('viz');
+    const statusOut = document.getElementById('status');
+    const sourceOut = document.getElementById('sourceOut');
+    const profileOut = document.getElementById('profileOut');
+    const nodeCountOut = document.getElementById('nodeCountOut');
+    const xOut = document.getElementById('xOut');
+    const yOut = document.getElementById('yOut');
+    const frameOut = document.getElementById('frameOut');
+    const timeOut = document.getElementById('timeOut');
+    const timeline = document.getElementById('timeline');
+    const timelineHint = document.getElementById('timelineHint');
+    const nodeSelect = document.getElementById('nodeSelect');
+    const nodeList = document.getElementById('nodeList');
+    const nodeLegend = document.getElementById('nodeLegend');
+
+    const dims = { w: 980, h: 780, pad: 78 };
+    const ANCHORS_URL = 'anchors.json';
+    const HISTORY_URL_CANDIDATES = ['central_history.json', 'history.json'];
+    const urlParams = new URLSearchParams(window.location.search);
+    const requestedPollMs = Number(urlParams.get('poll'));
+    const POLL_MS = Number.isFinite(requestedPollMs)
+      ? Math.max(75, Math.min(2000, Math.round(requestedPollMs)))
+      : 150;
+    const WORLD_MARGIN = 0.75;
+    const MAX_TRAIL_POINTS = 25;
+    const LIVE_MAX_TRAIL_POINTS = 25;
+    const ALL_NODES_VALUE = '__all__';
+
+    const DEFAULT_PROFILE = 'BED';
+    const DEFAULT_ANCHOR_PROFILES = {
+      BED: {
+        '1': { x: -0.9144, y: -0.47625 },
+        '2': { x:  0.9144, y: -0.47625 },
+        '3': { x: -0.9144, y:  0.47625 },
+        '4': { x:  0.9144, y:  0.47625 },
+        '5': { x:  0.0000, y:  0.47625 }
+      },
+      ECELAB: {
+        '1': { x: -2.5654, y: -2.5908 },
+        '2': { x:  3.0226, y: -2.5908 },
+        '3': { x: -2.5654, y:  2.5654 },
+        '4': { x:  3.0226, y:  2.5654 },
+        '5': { x:  0.0000, y:  2.5654 }
+      }
+    };
+
+    const NODE_COLORS = ['#dc2626', '#059669', '#7c3aed', '#ea580c', '#2563eb', '#db2777', '#0f766e', '#9333ea'];
+
+    let activeProfile = DEFAULT_PROFILE;
+    let anchors = structuredClone(DEFAULT_ANCHOR_PROFILES[DEFAULT_PROFILE]);
+    let geom = null;
+    let transform = null;
+
+    let usingUploadedFile = false;
+    let currentSourceName = 'waiting';
+    let lastAnchorsRaw = '';
+    let lastHistoryRaw = '';
+    let lastGoodHistoryRaw = '';
+
+    let historyEntries = [];
+    let historyByNode = new Map();
+    let nodeIds = [];
+    let latestByNode = new Map();
+    let selectedNode = ALL_NODES_VALUE;
+    let selectedFrameIndex = 0;
+
+    let watchTimer = null;
+    let watchInFlight = false;
+    let playbackTimer = null;
+
+    function isLiveWatching() {
+      return watchTimer !== null && !usingUploadedFile;
+    }
+
+    function esc(s) {
+      return String(s)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;');
+    }
+
+    function num(value) {
+      const n = Number(value);
+      return Number.isFinite(n) ? n : null;
+    }
+
+    function cloneAnchorMap(anchorMap) {
+      return Object.fromEntries(
+        Object.entries(anchorMap ?? {}).map(([id, item]) => [
+          id,
+          { x: Number(item?.x), y: Number(item?.y) }
+        ])
+      );
+    }
+
+    function isAnchorMap(input) {
+      if (!input || typeof input !== 'object' || Array.isArray(input)) return false;
+      return Object.values(input).some(item =>
+        item &&
+        typeof item === 'object' &&
+        !Array.isArray(item) &&
+        ('x' in item || 'y' in item)
+      );
+    }
+
+    function sortAnchorIds(ids) {
+      return [...ids].sort((a, b) => {
+        const numA = Number(a);
+        const numB = Number(b);
+        const bothNumeric = Number.isFinite(numA) && Number.isFinite(numB);
+        return bothNumeric ? numA - numB : String(a).localeCompare(String(b));
+      });
+    }
+
+    function clamp(value, min, max) {
+      return Math.min(max, Math.max(min, value));
+    }
+
+    function formatTimestamp(value) {
+      if (value == null) return 'n/a';
+      const n = Number(value);
+      if (!Number.isFinite(n)) return 'n/a';
+      const ms = n < 1e12 ? n * 1000 : n;
+      const date = new Date(ms);
+      if (Number.isNaN(date.getTime())) return 'n/a';
+      return date.toLocaleTimeString();
+    }
+
+    function colorForNode(nodeId) {
+      const index = nodeIds.indexOf(nodeId);
+      return NODE_COLORS[index >= 0 ? index % NODE_COLORS.length : 0];
+    }
+
+    function canonicalizeAnchors(input, fallbackProfile = DEFAULT_ANCHOR_PROFILES[DEFAULT_PROFILE]) {
+      const safeFallbackProfile = isAnchorMap(fallbackProfile)
+        ? fallbackProfile
+        : DEFAULT_ANCHOR_PROFILES[DEFAULT_PROFILE];
+      const anchorIds = sortAnchorIds(new Set([
+        ...Object.keys(safeFallbackProfile),
+        ...(isAnchorMap(input) ? Object.keys(input) : [])
+      ]));
+      const result = {};
+      for (const id of anchorIds) {
+        const item = input?.[id];
+        const x = num(item?.x);
+        const y = num(item?.y);
+        const fallback = safeFallbackProfile[id] ?? item ?? { x: 0, y: 0 };
+        const fallbackX = num(fallback?.x) ?? 0;
+        const fallbackY = num(fallback?.y) ?? 0;
+        result[id] = {
+          x: x === null ? fallbackX : x,
+          y: y === null ? fallbackY : y
+        };
+      }
+      return result;
+    }
+
+    function cross(o, a, b) {
+      return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+    }
+
+    function convexHull(points) {
+      const unique = [...new Map(points.map(p => [`${p.x},${p.y}`, { x: p.x, y: p.y }])).values()]
+        .sort((a, b) => (a.x - b.x) || (a.y - b.y));
+      if (unique.length <= 1) return unique;
+
+      const lower = [];
+      for (const point of unique) {
+        while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], point) <= 0) {
+          lower.pop();
+        }
+        lower.push(point);
+      }
+
+      const upper = [];
+      for (const point of [...unique].reverse()) {
+        while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], point) <= 0) {
+          upper.pop();
+        }
+        upper.push(point);
+      }
+
+      return lower.slice(0, -1).concat(upper.slice(0, -1));
+    }
+
+    function polygonCentroid(points) {
+      if (!points.length) return { x: 0, y: 0 };
+      if (points.length === 1) return points[0];
+      if (points.length === 2) return { x: (points[0].x + points[1].x) / 2, y: (points[0].y + points[1].y) / 2 };
+
+      let area2 = 0;
+      let cx = 0;
+      let cy = 0;
+      for (let i = 0; i < points.length; i++) {
+        const p1 = points[i];
+        const p2 = points[(i + 1) % points.length];
+        const crossTerm = p1.x * p2.y - p2.x * p1.y;
+        area2 += crossTerm;
+        cx += (p1.x + p2.x) * crossTerm;
+        cy += (p1.y + p2.y) * crossTerm;
+      }
+
+      if (Math.abs(area2) < 1e-9) {
+        return {
+          x: points.reduce((sum, p) => sum + p.x, 0) / points.length,
+          y: points.reduce((sum, p) => sum + p.y, 0) / points.length
+        };
+      }
+
+      return { x: cx / (3 * area2), y: cy / (3 * area2) };
+    }
+
+    function resolveAnchorConfig(input) {
+      const defaultAnchors = cloneAnchorMap(DEFAULT_ANCHOR_PROFILES[DEFAULT_PROFILE]);
+
+      if (isAnchorMap(input)) {
+        return {
+          profile: DEFAULT_PROFILE,
+          anchors: canonicalizeAnchors(input, defaultAnchors)
+        };
+      }
+
+      const requestedProfile = typeof input?.active === 'string' && input.active.trim()
+        ? input.active.trim()
+        : DEFAULT_PROFILE;
+      const profiles = input?.profiles && typeof input.profiles === 'object' ? input.profiles : null;
+
+      if (!profiles || !Object.keys(profiles).length) {
+        return { profile: DEFAULT_PROFILE, anchors: defaultAnchors };
+      }
+
+      const requestedSelection = profiles[requestedProfile];
+      if (isAnchorMap(requestedSelection)) {
+        const fallbackProfile = DEFAULT_ANCHOR_PROFILES[requestedProfile] ?? defaultAnchors;
+        return {
+          profile: requestedProfile,
+          anchors: canonicalizeAnchors(requestedSelection, fallbackProfile)
+        };
+      }
+
+      const firstAvailable = Object.entries(profiles).find(([, profile]) => isAnchorMap(profile));
+      const fallbackProfileName = firstAvailable?.[0] ?? DEFAULT_PROFILE;
+      const fallbackProfile = firstAvailable?.[1] ?? defaultAnchors;
+      const fallbackAnchors = DEFAULT_ANCHOR_PROFILES[fallbackProfileName] ?? defaultAnchors;
+
+      return {
+        profile: fallbackProfileName,
+        anchors: canonicalizeAnchors(fallbackProfile, fallbackAnchors)
+      };
+    }
+
+    function buildGeometry(anchorMap) {
+      const pts = Object.values(anchorMap);
+      const hull = convexHull(pts);
+      const minX = Math.min(...pts.map(p => p.x));
+      const maxX = Math.max(...pts.map(p => p.x));
+      const minY = Math.min(...pts.map(p => p.y));
+      const maxY = Math.max(...pts.map(p => p.y));
+      const centroid = polygonCentroid(hull);
+
+      const world = {
+        minX: minX - WORLD_MARGIN,
+        maxX: maxX + WORLD_MARGIN,
+        minY: minY - WORLD_MARGIN,
+        maxY: maxY + WORLD_MARGIN
+      };
+
+      const usableW = dims.w - dims.pad * 2;
+      const usableH = dims.h - dims.pad * 2;
+      const worldW = world.maxX - world.minX;
+      const worldH = world.maxY - world.minY;
+      const scale = Math.min(usableW / worldW, usableH / worldH);
+      const drawnW = worldW * scale;
+      const drawnH = worldH * scale;
+      const offsetX = (dims.w - drawnW) / 2;
+      const offsetY = (dims.h - drawnH) / 2;
+
+      return {
+        bounds: { minX, maxX, minY, maxY },
+        hull,
+        centroid,
+        world,
+        scale,
+        offsetX,
+        offsetY
+      };
+    }
+
+    function applyAnchors(anchorMap) {
+      anchors = canonicalizeAnchors(anchorMap);
+      geom = buildGeometry(anchors);
+      transform = { scale: geom.scale, offsetX: geom.offsetX, offsetY: geom.offsetY };
+      profileOut.textContent = activeProfile;
+    }
+
+    function sx(x) {
+      return transform.offsetX + (x - geom.world.minX) * transform.scale;
+    }
+
+    function sy(y) {
+      return dims.h - (transform.offsetY + (y - geom.world.minY) * transform.scale);
+    }
+
+    function getPoint(source) {
+      if (!source || typeof source !== 'object') return null;
+      const pose = source.pose ?? source;
+      const x = num(pose.x_m) ?? num(pose.x) ?? num(source.x_m) ?? num(source.x);
+      const y = num(pose.y_m) ?? num(pose.y) ?? num(source.y_m) ?? num(source.y);
+      if (x === null || y === null) return null;
+      return { x, y };
+    }
+
+    function normalizeHistoryEntry(entry, fallbackIndex = 0) {
+      if (!entry || typeof entry !== 'object') return null;
+      const point = getPoint(entry.pose ?? entry.raw_pose ?? entry);
+      if (!point) return null;
+
+      const nodeId = String(entry.node_id ?? entry.nodeId ?? entry.node ?? 'unknown');
+      const timestamp = num(entry.timestamp) ?? num(entry.ts) ?? fallbackIndex;
+      const seq = entry.sequence_number ?? entry.seq ?? null;
+      const quality = entry.quality?.score ?? entry.quality ?? null;
+
+      return {
+        node_id: nodeId,
+        timestamp,
+        sequence_number: seq,
+        quality,
+        pose: { x_m: point.x, y_m: point.y },
+        raw: entry
+      };
+    }
+
+    function regroupHistory(entries) {
+      historyEntries = entries;
+      historyByNode = new Map();
+      latestByNode = new Map();
+
+      for (const entry of historyEntries) {
+        if (!historyByNode.has(entry.node_id)) {
+          historyByNode.set(entry.node_id, []);
+        }
+        historyByNode.get(entry.node_id).push(entry);
+      }
+
+      nodeIds = [...historyByNode.keys()].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+
+      for (const nodeId of nodeIds) {
+        const frames = historyByNode.get(nodeId) ?? [];
+        frames.sort((a, b) => (a.timestamp - b.timestamp));
+        if (frames.length) {
+          latestByNode.set(nodeId, frames[frames.length - 1]);
+        }
+      }
+
+      if (selectedNode !== ALL_NODES_VALUE && !historyByNode.has(selectedNode)) {
+        selectedNode = nodeIds[0] ?? ALL_NODES_VALUE;
+      }
+
+      renderNodeControls();
+      renderNodeList();
+      renderNodeLegend();
+    }
+
+    function renderNodeControls() {
+      const previous = nodeSelect.value || selectedNode;
+      nodeSelect.innerHTML = '';
+
+      const allOption = document.createElement('option');
+      allOption.value = ALL_NODES_VALUE;
+      allOption.textContent = 'All nodes';
+      nodeSelect.appendChild(allOption);
+
+      for (const nodeId of nodeIds) {
+        const option = document.createElement('option');
+        option.value = nodeId;
+        option.textContent = nodeId;
+        nodeSelect.appendChild(option);
+      }
+
+      const desired = nodeIds.includes(previous) || previous === ALL_NODES_VALUE ? previous : ALL_NODES_VALUE;
+      selectedNode = desired;
+      nodeSelect.value = desired;
+      nodeCountOut.textContent = String(nodeIds.length);
+    }
+
+    function renderNodeLegend() {
+      nodeLegend.innerHTML = nodeIds.length
+        ? nodeIds.map(nodeId => `
+            <div><span class="dot" style="background:${colorForNode(nodeId)}"></span>${esc(nodeId)}</div>
+          `).join('')
+        : '<div class="helper">No node data loaded yet.</div>';
+    }
+
+    function renderNodeList() {
+      if (!nodeIds.length) {
+        nodeList.innerHTML = '<div class="empty">No node snapshots yet.</div>';
+        return;
+      }
+
+      nodeList.innerHTML = nodeIds.map(nodeId => {
+        const entry = latestByNode.get(nodeId);
+        const point = getPoint(entry?.pose);
+        const frames = historyByNode.get(nodeId) ?? [];
+        const quality = entry?.quality;
+        return `
+          <div class="node-item">
+            <div class="node-top">
+              <div class="node-name">
+                <span class="dot" style="background:${colorForNode(nodeId)}"></span>
+                ${esc(nodeId)}
+              </div>
+              <span class="pill">${frames.length} frame${frames.length === 1 ? '' : 's'}</span>
+            </div>
+            <div class="node-meta mono">x=${point ? point.x.toFixed(3) : 'n/a'} y=${point ? point.y.toFixed(3) : 'n/a'}</div>
+            <div class="node-meta mono">seq=${entry?.sequence_number ?? 'n/a'} time=${formatTimestamp(entry?.timestamp)}</div>
+            <div class="node-meta mono">quality=${quality == null || !Number.isFinite(Number(quality)) ? 'n/a' : Number(quality).toFixed(2)}</div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function getSelectedFrames() {
+      return selectedNode === ALL_NODES_VALUE ? [] : (historyByNode.get(selectedNode) ?? []);
+    }
+
+    function getSelectedLiveEntry() {
+      if (selectedNode === ALL_NODES_VALUE) return null;
+      return latestByNode.get(selectedNode) ?? null;
+    }
+
+    function setStatus(text) {
+      statusOut.textContent = text;
+    }
+
+    function refreshStatsForSelection(status = null) {
+      const frames = getSelectedFrames();
+      const liveMode = isLiveWatching();
+
+      if (selectedNode === ALL_NODES_VALUE) {
+        xOut.textContent = 'n/a';
+        yOut.textContent = 'n/a';
+        frameOut.textContent = `${historyEntries.length} total`;
+        const latestTimes = [...latestByNode.values()].map(entry => entry.timestamp).filter(v => v != null);
+        timeOut.textContent = latestTimes.length ? formatTimestamp(Math.max(...latestTimes)) : 'n/a';
+        timeline.disabled = true;
+        timelineHint.textContent = liveMode
+          ? 'Live mode shows the newest node positions.'
+          : 'Timeline is enabled only when one node is selected.';
+        if (status) setStatus(status);
+        return;
+      }
+
+      if (liveMode) {
+        const entry = getSelectedLiveEntry();
+        const point = getPoint(entry?.pose);
+        selectedFrameIndex = frames.length ? frames.length - 1 : 0;
+        timeline.disabled = true;
+        timeline.max = Math.max(0, frames.length - 1);
+        timeline.value = String(selectedFrameIndex);
+        timelineHint.textContent = frames.length
+          ? `Live mode: showing latest ${selectedNode} position.`
+          : `No live frames loaded for ${selectedNode}.`;
+        xOut.textContent = point ? point.x.toFixed(3) : 'n/a';
+        yOut.textContent = point ? point.y.toFixed(3) : 'n/a';
+        frameOut.textContent = frames.length ? `${frames.length} live` : '0 live';
+        timeOut.textContent = entry ? formatTimestamp(entry.timestamp) : 'n/a';
+        if (status) setStatus(status);
+        return;
+      }
+
+      timeline.disabled = !frames.length;
+      timeline.max = Math.max(0, frames.length - 1);
+      selectedFrameIndex = clamp(selectedFrameIndex, 0, Math.max(0, frames.length - 1));
+      timeline.value = String(selectedFrameIndex);
+      timelineHint.textContent = frames.length
+        ? `Showing ${selectedNode}. Scrub or play its history.`
+        : `No frames loaded for ${selectedNode}.`;
+
+      if (!frames.length) {
+        xOut.textContent = 'n/a';
+        yOut.textContent = 'n/a';
+        frameOut.textContent = '0 / 0';
+        timeOut.textContent = 'n/a';
+        if (status) setStatus(status);
+        return;
+      }
+
+      const entry = frames[selectedFrameIndex];
+      const point = getPoint(entry.pose);
+      xOut.textContent = point ? point.x.toFixed(3) : 'n/a';
+      yOut.textContent = point ? point.y.toFixed(3) : 'n/a';
+      frameOut.textContent = `${selectedFrameIndex + 1} / ${frames.length}`;
+      timeOut.textContent = formatTimestamp(entry.timestamp);
+      if (status) setStatus(status);
+    }
+
+    function drawGrid() {
+      const lines = [];
+      const startX = Math.ceil(geom.world.minX);
+      const endX = Math.floor(geom.world.maxX);
+      const startY = Math.ceil(geom.world.minY);
+      const endY = Math.floor(geom.world.maxY);
+
+      for (let x = startX; x <= endX; x++) {
+        lines.push(`
+          <line x1="${sx(x)}" y1="${sy(geom.world.minY)}" x2="${sx(x)}" y2="${sy(geom.world.maxY)}" stroke="${x === 0 ? '#c7d2fe' : '#eef2f7'}" stroke-width="${x === 0 ? 1.8 : 1}" />
+        `);
+      }
+      for (let y = startY; y <= endY; y++) {
+        lines.push(`
+          <line x1="${sx(geom.world.minX)}" y1="${sy(y)}" x2="${sx(geom.world.maxX)}" y2="${sy(y)}" stroke="${y === 0 ? '#c7d2fe' : '#eef2f7'}" stroke-width="${y === 0 ? 1.8 : 1}" />
+        `);
+      }
+      return lines.join('');
+    }
+
+    function drawAxes() {
+      return `
+        <line x1="${sx(geom.world.minX)}" y1="${sy(0)}" x2="${sx(geom.world.maxX)}" y2="${sy(0)}" stroke="#d1d5db" stroke-width="2" />
+        <line x1="${sx(0)}" y1="${sy(geom.world.minY)}" x2="${sx(0)}" y2="${sy(geom.world.maxY)}" stroke="#d1d5db" stroke-width="2" />
+        <text x="${sx(geom.world.maxX) - 10}" y="${sy(0) - 10}" font-size="14" fill="#6b7280">+x</text>
+        <text x="${sx(0) + 10}" y="${sy(geom.world.maxY) + 18}" font-size="14" fill="#6b7280">+y</text>
+        <text x="${sx(0) + 10}" y="${sy(0) - 10}" font-size="13" fill="#6b7280">(0,0)</text>
+      `;
+    }
+
+    function drawFootprint() {
+      const polygonPoints = geom.hull.map(p => `${sx(p.x)},${sy(p.y)}`).join(' ');
+      const top = sy(geom.bounds.maxY);
+      return `
+        <polygon points="${polygonPoints}" fill="#eef2ff" stroke="#4f46e5" stroke-width="3" stroke-linejoin="round" />
+        <polyline points="${[...geom.hull, geom.hull[0]].map(p => `${sx(p.x)},${sy(p.y)}`).join(' ')}" fill="none" stroke="#6366f1" stroke-width="2.4" stroke-dasharray="8 6" />
+        <text x="${sx(geom.centroid.x)}" y="${top - 14}" text-anchor="middle" font-size="16" fill="#374151">Anchor footprint</text>
+      `;
+    }
+
+    function drawAnchors() {
+      return Object.entries(anchors).map(([id, p]) => `
+        <circle cx="${sx(p.x)}" cy="${sy(p.y)}" r="9" fill="#2563eb" stroke="white" stroke-width="2.5" />
+        <text x="${sx(p.x) + 12}" y="${sy(p.y) - 11}" font-size="14" fill="#1f2937">A${esc(id)}</text>
+        <text x="${sx(p.x) + 12}" y="${sy(p.y) + 9}" font-size="12" fill="#6b7280">(${p.x.toFixed(3)}, ${p.y.toFixed(3)})</text>
+      `).join('');
+    }
+
+    function buildDrawState() {
+      const liveMode = isLiveWatching();
+      if (selectedNode === ALL_NODES_VALUE) {
+        return nodeIds.map(nodeId => {
+          const frames = historyByNode.get(nodeId) ?? [];
+          const latest = frames[frames.length - 1] ?? null;
+          const trailLimit = liveMode ? LIVE_MAX_TRAIL_POINTS : MAX_TRAIL_POINTS;
+          const trail = trailLimit > 0
+            ? frames.slice(-trailLimit).map(entry => ({ x: entry.pose.x_m, y: entry.pose.y_m }))
+            : [];
+          return {
+            nodeId,
+            color: colorForNode(nodeId),
+            trail,
+            current: latest ? { x: latest.pose.x_m, y: latest.pose.y_m } : null,
+            latest
+          };
+        }).filter(item => item.current);
+      }
+
+      const frames = getSelectedFrames();
+      const selectedFrames = liveMode
+        ? frames
+        : frames.slice(0, selectedFrameIndex + 1);
+      const latest = liveMode
+        ? (latestByNode.get(selectedNode) ?? null)
+        : (selectedFrames[selectedFrames.length - 1] ?? null);
+      return latest ? [{
+        nodeId: selectedNode,
+        color: colorForNode(selectedNode),
+        trail: (liveMode ? LIVE_MAX_TRAIL_POINTS : MAX_TRAIL_POINTS) > 0
+          ? selectedFrames.slice(-(liveMode ? LIVE_MAX_TRAIL_POINTS : MAX_TRAIL_POINTS)).map(entry => ({ x: entry.pose.x_m, y: entry.pose.y_m }))
+          : [],
+        current: { x: latest.pose.x_m, y: latest.pose.y_m },
+        latest
+      }] : [];
+    }
+
+    function drawTrail(state) {
+      if (state.trail.length < 2) return '';
+      const pts = state.trail.map(p => `${sx(p.x)},${sy(p.y)}`).join(' ');
+      return `<polyline points="${pts}" fill="none" stroke="${state.color}" stroke-width="2.5" stroke-opacity="0.55" stroke-linecap="round" stroke-linejoin="round" />`;
+    }
+
+    function drawCurrent(state) {
+      return `
+        <circle cx="${sx(state.current.x)}" cy="${sy(state.current.y)}" r="12" fill="${state.color}" stroke="white" stroke-width="3" />
+        <text x="${sx(state.current.x) + 14}" y="${sy(state.current.y) - 14}" font-size="15" fill="${state.color}">${esc(state.nodeId)}</text>
+      `;
+    }
+
+    function drawBoundsText() {
+      return `
+        <text x="${dims.pad}" y="${dims.h - 20}" font-size="13" fill="#6b7280">x range: ${geom.world.minX.toFixed(2)} to ${geom.world.maxX.toFixed(2)} m</text>
+        <text x="${dims.pad}" y="${dims.h - 40}" font-size="13" fill="#6b7280">y range: ${geom.world.minY.toFixed(2)} to ${geom.world.maxY.toFixed(2)} m</text>
+      `;
+    }
+
+    function draw() {
+      if (!geom || !transform) return;
+      const states = buildDrawState();
+      svg.innerHTML = `
+        <rect x="0" y="0" width="${dims.w}" height="${dims.h}" fill="white" rx="16" />
+        ${drawGrid()}
+        ${drawAxes()}
+        ${drawFootprint()}
+        ${states.map(drawTrail).join('')}
+        ${drawAnchors()}
+        ${states.map(drawCurrent).join('')}
+        ${drawBoundsText()}
+      `;
+    }
+
+    function stopPlayback() {
+      if (playbackTimer) {
+        clearInterval(playbackTimer);
+        playbackTimer = null;
+      }
+    }
+
+    function stopWatching() {
+      if (watchTimer) {
+        clearTimeout(watchTimer);
+        watchTimer = null;
+      }
+      watchInFlight = false;
+    }
+
+    async function fetchText(url) {
+      const res = await fetch(`${url}?ts=${Date.now()}`, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.text();
+    }
+
+    async function fetchFirstAvailableText(urls) {
+      let lastError = null;
+      for (const url of urls) {
+        try {
+          const text = await fetchText(url);
+          return { url, text };
+        } catch (err) {
+          lastError = err;
+        }
+      }
+      throw lastError ?? new Error('No source available');
+    }
+
+    async function syncAnchors({ forceRedraw = false } = {}) {
+      if (usingUploadedFile) return false;
+      try {
+        const text = await fetchText(ANCHORS_URL);
+        if (!forceRedraw && text === lastAnchorsRaw) return false;
+        const data = JSON.parse(text);
+        const resolved = resolveAnchorConfig(data);
+        activeProfile = resolved.profile;
+        applyAnchors(resolved.anchors);
+        lastAnchorsRaw = text;
+        draw();
+        return true;
+      } catch (err) {
+        return false;
+      }
+    }
+
+    async function syncHistory(statusLabel = 'history loaded', { forceRedraw = false } = {}) {
+      if (usingUploadedFile) return false;
+      try {
+        const { url, text } = await fetchFirstAvailableText(HISTORY_URL_CANDIDATES);
+        if (!forceRedraw && text === lastHistoryRaw) {
+          if (watchTimer) setStatus(`auto watching ${url}`);
+          return false;
+        }
+
+        const data = JSON.parse(text);
+        if (!Array.isArray(data)) throw new Error('History must be an array');
+
+        const normalized = data
+          .map((entry, index) => normalizeHistoryEntry(entry, index))
+          .filter(Boolean);
+
+        lastHistoryRaw = text;
+        lastGoodHistoryRaw = text;
+        currentSourceName = url;
+        sourceOut.textContent = `${ANCHORS_URL} + ${url}`;
+        regroupHistory(normalized);
+
+        if (selectedNode !== ALL_NODES_VALUE) {
+          const frames = getSelectedFrames();
+          selectedFrameIndex = frames.length ? frames.length - 1 : 0;
+        }
+
+        refreshStatsForSelection(statusLabel);
+        draw();
+        return true;
+      } catch (err) {
+        if (watchTimer) {
+          setStatus('waiting for next valid history write');
+          return false;
+        }
+        setStatus('failed to load history file');
+        return false;
+      }
+    }
+
+    async function syncAll(statusLabel = 'synced', { forceRedraw = false } = {}) {
+      const anchorsChanged = await syncAnchors({ forceRedraw });
+      const historyChanged = await syncHistory(statusLabel, { forceRedraw });
+      if (!anchorsChanged && !historyChanged && forceRedraw) {
+        refreshStatsForSelection(statusLabel);
+        draw();
+      }
+      if (!anchorsChanged && !historyChanged && watchTimer) {
+        setStatus(`auto watching ${currentSourceName}`);
+      }
+    }
+
+    function scheduleNextWatch() {
+      if (usingUploadedFile) return;
+      watchTimer = setTimeout(async () => {
+        if (watchInFlight) {
+          scheduleNextWatch();
+          return;
+        }
+        watchInFlight = true;
+        try {
+          await syncAll('auto updated');
+        } finally {
+          watchInFlight = false;
+          if (watchTimer !== null) {
+            scheduleNextWatch();
+          }
+        }
+      }, POLL_MS);
+    }
+
+    function startWatching() {
+      usingUploadedFile = false;
+      stopWatching();
+      syncAll('auto updated', { forceRedraw: true });
+      watchTimer = -1;
+      scheduleNextWatch();
+      setStatus(`auto watching ${currentSourceName === 'waiting' ? 'history source' : currentSourceName}`);
+    }
+
+    function loadHistoryFromFile(file) {
+      stopPlayback();
+      stopWatching();
+      usingUploadedFile = true;
+
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const data = JSON.parse(reader.result);
+          if (!Array.isArray(data)) throw new Error('Expected array');
+          const normalized = data.map((entry, index) => normalizeHistoryEntry(entry, index)).filter(Boolean);
+          regroupHistory(normalized);
+          currentSourceName = file.name;
+          sourceOut.textContent = file.name;
+          selectedFrameIndex = 0;
+          if (selectedNode !== ALL_NODES_VALUE) {
+            const frames = getSelectedFrames();
+            if (frames.length) selectedFrameIndex = frames.length - 1;
+          }
+          refreshStatsForSelection('file history loaded');
+          draw();
+        } catch (err) {
+          setStatus('invalid history file');
+        }
+      };
+      reader.readAsText(file);
+    }
+
+    function playHistory() {
+      if (selectedNode === ALL_NODES_VALUE) {
+        setStatus('select one node to play history');
+        return;
+      }
+      const frames = getSelectedFrames();
+      if (!frames.length) {
+        setStatus('no history loaded for selected node');
+        return;
+      }
+
+      stopPlayback();
+      playbackTimer = setInterval(() => {
+        if (selectedFrameIndex >= frames.length - 1) {
+          stopPlayback();
+          setStatus('playback finished');
+          return;
+        }
+        selectedFrameIndex += 1;
+        refreshStatsForSelection('history playback');
+        draw();
+      }, 120);
+    }
+
+    nodeSelect.addEventListener('change', () => {
+      stopPlayback();
+      selectedNode = nodeSelect.value;
+      selectedFrameIndex = 0;
+      const frames = getSelectedFrames();
+      if (selectedNode !== ALL_NODES_VALUE && frames.length) {
+        selectedFrameIndex = frames.length - 1;
+      }
+      refreshStatsForSelection(`viewing ${selectedNode === ALL_NODES_VALUE ? 'all nodes' : selectedNode}`);
+      draw();
+    });
+
+    timeline.addEventListener('input', () => {
+      if (selectedNode === ALL_NODES_VALUE) return;
+      stopPlayback();
+      selectedFrameIndex = Number(timeline.value);
+      refreshStatsForSelection('timeline scrub');
+      draw();
+    });
+
+    document.getElementById('playBtn').addEventListener('click', playHistory);
+    document.getElementById('pauseBtn').addEventListener('click', () => {
+      stopPlayback();
+      setStatus('playback paused');
+    });
+    document.getElementById('clearBtn').addEventListener('click', () => {
+      stopPlayback();
+      if (selectedNode === ALL_NODES_VALUE) {
+        regroupHistory([]);
+      } else {
+        const remaining = historyEntries.filter(entry => entry.node_id !== selectedNode);
+        regroupHistory(remaining);
+      }
+      selectedFrameIndex = 0;
+      lastHistoryRaw = '';
+      refreshStatsForSelection('local trails cleared');
+      draw();
+    });
+    document.getElementById('reloadBtn').addEventListener('click', () => {
+      usingUploadedFile = false;
+      lastHistoryRaw = '';
+      lastAnchorsRaw = '';
+      syncAll('manually reloaded', { forceRedraw: true });
+    });
+    document.getElementById('liveBtn').addEventListener('click', startWatching);
+    document.getElementById('stopLiveBtn').addEventListener('click', () => {
+      stopWatching();
+      setStatus('auto watch stopped');
+    });
+    document.getElementById('filePicker').addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (file) loadHistoryFromFile(file);
+    });
+
+    applyAnchors(DEFAULT_ANCHOR_PROFILES[DEFAULT_PROFILE]);
+    regroupHistory([]);
+    refreshStatsForSelection('idle');
+    draw();
+    startWatching();
+  </script>
+</body>
+</html>
