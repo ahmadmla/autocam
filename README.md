@@ -1,6 +1,6 @@
 # AutoCam
 
-AutoCam is a real-time indoor tracking system for automated camera framing. It uses multiple Raspberry Pi-connected UWB nodes to collect range data, schedules those nodes over MQTT, solves a bounded 2D pose from anchor distances, filters the result for stability, and writes live history for a browser visualizer.
+AutoCam is a real-time indoor tracking system for automated camera framing. It uses multiple Raspberry Pi-connected UWB nodes to collect range data, schedules those nodes over MQTT, solves a bounded 2D pose from anchor distances, filters the result for stability, and writes live history for a browser dashboard.
 
 This repo contains the end-to-end tracking stack:
 
@@ -15,7 +15,7 @@ Homography-based camera mapping is still in progress.
 
 Each node listens to a DWM3001-based UWB device over serial, captures `SESSION_INFO_NTF` measurement blocks, and publishes normalized anchor readings to MQTT. A central logger consumes those readings, converts slant ranges into planar ranges, runs bounded 2D multilateration, rejects obvious outliers, applies motion-aware filtering, and saves the resulting pose stream to disk for visualization.
 
-The visualizer reads `central_history.json` and `anchors.json` to render:
+The dashboard reads `central_history.json` and `anchors.json` to render:
 
 - anchor layout
 - current tag position
@@ -30,7 +30,7 @@ The visualizer reads `central_history.json` and `anchors.json` to render:
    Runs round-robin slot scheduling so only one node is actively ranging at a time, with timeout handling and cooldown logic.
 3. `pose_logger_runtime.py`
    Consumes MQTT payloads, maintains per-node tracking pipelines, filters ranges, solves pose, scores solution quality, and writes history/log output.
-4. `visualizer.html`
+4. `dashboard.html`
    Displays the room geometry, anchor footprint, current pose, and motion trail from the generated history file.
 5. `run_central_stack.py`
    Launches the central logger, scheduler, and local static server together from one terminal.
@@ -61,7 +61,7 @@ Key behaviors implemented here:
 - `pose_logger_runtime.py` - central runtime and tracking pipeline
 - `run_central_stack.py` - one-command launcher for the central stack
 - `anchors.json` - editable anchor layouts / room profiles
-- `visualizer.html` - browser visualizer for live and recorded history
+- `dashboard.html` - browser dashboard for live and recorded history
 - `uwb_pose/config.py` - runtime configuration and tuning constants
 - `uwb_pose/geometry.py` - anchor geometry and bounds handling
 - `uwb_pose/solver.py` - multilateration, filtering, and quality logic
@@ -73,7 +73,7 @@ Key behaviors implemented here:
 - Python 3.10+
 - an MQTT broker running on the central machine, or another reachable host, with port 1883 accessible to both the central machine and all Raspberry Pi nodes
 - the Python packages listed in `requirements.txt`
-- a browser for `visualizer.html`
+- a browser for `dashboard.html`
 
 Set up the Python environment with a virtual environment, but do not commit `.venv/` to git:
 
@@ -178,12 +178,12 @@ This starts:
 
 - the central pose logger
 - the scheduler
-- a local static file server for the visualizer
+- a local static file server for the dashboard
 
-By default the visualizer is served at:
+By default the dashboard is served at:
 
 ```text
-http://localhost:8000/autocam/visualizer.html
+http://localhost:8000/autocam/dashboard.html
 ```
 
 ### 5. Run a node process on each Raspberry Pi
@@ -256,7 +256,7 @@ Most tuning constants for filtering and solver behavior live in `uwb_pose/config
 
 The main generated artifacts are:
 
-- `central_history.json` - live pose history for the visualizer
+- `central_history.json` - live pose history for the dashboard
 - `central_pose_logger_output.txt` - event log from the central pipeline
 - `central_raw_input_log.txt` - raw serial/ingest diagnostics
 
