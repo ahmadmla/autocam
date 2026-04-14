@@ -1,6 +1,6 @@
 # AutoCam
 
-AutoCam is a real-time indoor tracking system for automated camera framing. It uses multiple Raspberry Pi-connected UWB nodes to collect range data, schedules those nodes over MQTT, solves a bounded 2D pose from anchor distances, filters the result for stability, and writes live history for a browser dashboard.
+AutoCam is a real-time indoor tracking system for automated camera framing. It uses multiple Raspberry Pi-connected UWB nodes to collect range data, schedules those nodes over MQTT, solves a bounded 2D pose from anchor distances, filters the result for stability, and writes live history for a browser visualizer.
 
 This repo contains the end-to-end tracking stack:
 
@@ -15,7 +15,7 @@ Homography-based camera mapping is still in progress.
 
 Each node listens to a DWM3001-based UWB device over serial, captures `SESSION_INFO_NTF` measurement blocks, and publishes normalized anchor readings to MQTT. A central logger consumes those readings, converts slant ranges into planar ranges, runs bounded 2D multilateration, rejects obvious outliers, applies motion-aware filtering, and saves the resulting pose stream to disk for visualization.
 
-The dashboard reads `central_history.json` and `anchors.json` to render:
+The visualizer reads `central_history.json` and `anchors.json` to render:
 
 - anchor layout
 - current tag position
@@ -30,7 +30,7 @@ The dashboard reads `central_history.json` and `anchors.json` to render:
    Runs round-robin slot scheduling so only one node is actively ranging at a time, with timeout handling and cooldown logic.
 3. `pose_logger_runtime.py`
    Consumes MQTT payloads, maintains per-node tracking pipelines, filters ranges, solves pose, scores solution quality, and writes history/log output.
-4. `dashboard.html`
+4. `visualizer.html`
    Displays the room geometry, anchor footprint, current pose, and motion trail from the generated history file.
 5. `run_central_stack.py`
    Launches the central logger, scheduler, and local static server together from one terminal.
@@ -61,7 +61,7 @@ Key behaviors implemented here:
 - `pose_logger_runtime.py` - central runtime and tracking pipeline
 - `run_central_stack.py` - one-command launcher for the central stack
 - `anchors.json` - editable anchor layouts / room profiles
-- `dashboard.html` - browser dashboard for live and recorded history
+- `visualizer.html` - browser visualizer for live and recorded history
 - `uwb_pose/config.py` - runtime configuration and tuning constants
 - `uwb_pose/geometry.py` - anchor geometry and bounds handling
 - `uwb_pose/solver.py` - multilateration, filtering, and quality logic
@@ -71,9 +71,9 @@ Key behaviors implemented here:
 ## Requirements
 
 - Python 3.10+
-- an MQTT broker reachable by the nodes and central machine
+- an MQTT broker running on the central machine, or another reachable host, with port 1883 accessible to both the central machine and all Raspberry Pi nodes
 - the Python packages listed in `requirements.txt`
-- a browser for `dashboard.html`
+- a browser for `visualizer.html`
 
 Set up the Python environment with a virtual environment, but do not commit `.venv/` to git:
 
@@ -87,9 +87,71 @@ For environment setup, start from `.env.example` and replace the sample values w
 
 ## Quick Start
 
-### 1. Start an MQTT broker
+### 1. Start and verify the MQTT broker on the central machine
 
-Use Mosquitto or any broker that the Pis and central machine can reach.
+This system expects the central machine to run an MQTT broker that is reachable from both:
+
+- the central Python processes
+- the Raspberry Pi nodes over the local network
+
+Mosquitto works well for this setup.
+
+Install it on the central machine:
+
+```bash
+sudo apt update
+sudo apt install mosquitto mosquitto-clients
+sudo systemctl enable mosquitto
+```
+
+Create a listener config so remote nodes can connect:
+
+```bash
+sudo mkdir -p /etc/mosquitto/conf.d
+sudo tee /etc/mosquitto/conf.d/uwb.conf > /dev/null <<'EOF'
+listener 1883 0.0.0.0
+allow_anonymous true
+EOF
+```
+
+Restart the broker:
+
+```bash
+sudo systemctl restart mosquitto
+```
+
+Verify that it is listening on the network, not just localhost:
+
+```bash
+ss -ltnp | grep 1883
+```
+
+A good result looks like one of these:
+
+```text
+0.0.0.0:1883
+<central-lan-ip>:1883
+```
+
+If it only shows `127.0.0.1:1883`, the central machine can connect locally but remote nodes will get `ConnectionRefusedError`.
+
+You can also test the broker locally on the central machine:
+
+```bash
+mosquitto_sub -h 127.0.0.1 -p 1883 -t 'test/#'
+```
+
+In another terminal:
+
+```bash
+mosquitto_pub -h 127.0.0.1 -p 1883 -t 'test/hello' -m 'hi'
+```
+
+If needed, allow the port through the firewall:
+
+```bash
+sudo ufw allow 1883/tcp
+```
 
 ### 2. Configure anchor layout
 
@@ -116,12 +178,12 @@ This starts:
 
 - the central pose logger
 - the scheduler
-- a local static file server for the dashboard
+- a local static file server for the visualizer
 
-By default the dashboard is served at:
+By default the visualizer is served at:
 
 ```text
-http://localhost:8000/autocam/dashboard.html
+http://localhost:8000/autocam/visualizer.html
 ```
 
 ### 5. Run a node process on each Raspberry Pi
@@ -136,6 +198,30 @@ Each node needs its own environment configuration, especially:
 - `UWB_PORT`
 - `MQTT_HOST`
 - `MQTT_PORT`
+
+## Central vs Node MQTT Configuration
+
+The central machine and the nodes should not use the same `MQTT_HOST` value.
+
+### Central machine
+
+The central logger and scheduler usually connect to the broker on the same machine:
+
+```env
+MQTT_HOST=127.0.0.1
+MQTT_PORT=1883
+```
+
+### Node machines
+
+Each Raspberry Pi node should connect to the central machine's LAN IP:
+
+```env
+MQTT_HOST=<central-lan-ip>
+MQTT_PORT=1883
+```
+
+Do not use `127.0.0.1` on a node unless that node is intentionally running its own broker. On a node, `127.0.0.1` points back to the node itself, not the central machine.
 
 ## Useful Environment Variables
 
@@ -170,11 +256,51 @@ Most tuning constants for filtering and solver behavior live in `uwb_pose/config
 
 The main generated artifacts are:
 
-- `central_history.json` - live pose history for the dashboard
+- `central_history.json` - live pose history for the visualizer
 - `central_pose_logger_output.txt` - event log from the central pipeline
 - `central_raw_input_log.txt` - raw serial/ingest diagnostics
 
 The node processes also emit their own raw serial and event logs based on `NODE_ID`.
+
+## Troubleshooting
+
+### `ConnectionRefusedError: [Errno 111] Connection refused`
+
+This usually means the MQTT TCP connection was rejected before MQTT authentication or topic handling even began.
+
+Common causes:
+
+1. Mosquitto is not running on the central machine
+2. Mosquitto is listening only on `127.0.0.1`
+3. A node is using the wrong `MQTT_HOST`
+4. Port `1883` is blocked by a firewall
+
+Useful checks:
+
+On the central machine:
+
+```bash
+sudo systemctl status mosquitto
+ss -ltnp | grep 1883
+```
+
+On a node:
+
+```bash
+echo "$MQTT_HOST"
+echo "$MQTT_PORT"
+nc -vz <central-lan-ip> 1883
+```
+
+Interpretation:
+
+- `succeeded` means the node can reach the broker port
+- `connection refused` means the host is reachable but nothing is accepting connections on that interface and port
+- `timed out` usually means wrong IP, network path issue, or firewall issue
+
+### Fresh reflash warning
+
+If the central Pi was reflashed or replaced, re-check the Mosquitto listener config. A fresh install often ends up working only for localhost until the LAN listener is recreated.
 
 ## Firmware Note
 
