@@ -4,12 +4,23 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
-from .config import env_float, env_int, load_runtime_config
-from .control import Bld305sMotorBus, MotorStatus
+if __package__ in (None, ""):
+    PACKAGE_ROOT = Path(__file__).resolve().parent
+    REPO_ROOT = PACKAGE_ROOT.parent
+    for candidate in (str(REPO_ROOT), str(PACKAGE_ROOT)):
+        if candidate not in sys.path:
+            sys.path.insert(0, candidate)
+    from config import env_float, env_int, load_runtime_config
+    from control import Bld305sMotorBus, MotorStatus
+else:
+    from .config import env_float, env_int, load_runtime_config
+    from .control import Bld305sMotorBus, MotorStatus
 
 LOG = logging.getLogger("motor_manual")
 
@@ -94,7 +105,7 @@ class ManualMotorSession:
         for index in range(count):
             self.check_fault()
             self.motor_bus.set_speed(self.axis.motor_id, driver_raw)
-            self.motor_bus.run(self.axis.motor_id)
+            self.motor_bus.run(self.axis.motor_id, direction=1 if driver_raw > 0 else -1)
             LOG.info(
                 "manual_pulse axis=%s step=%s/%s logical_raw=%s driver_raw=%s duration_s=%.3f",
                 self.axis.axis_name,
@@ -335,3 +346,5 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+

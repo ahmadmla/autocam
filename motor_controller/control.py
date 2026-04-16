@@ -33,6 +33,7 @@ REG_ACTUAL_VOLTAGE = 0x00C6
 
 RUN_STOP = 0
 RUN_FORWARD = 1
+RUN_REVERSE = 2
 CONTROL_MODE_SPEED = 1
 
 
@@ -159,10 +160,20 @@ class Bld305sMotorBus:
         self.write_reg(motor_id, REG_FAULT_CLEAR, 0)
 
     def set_speed(self, motor_id: int, raw_speed: int) -> None:
-        self.write_reg(motor_id, REG_SPEED_SET, encode_signed_16(raw_speed))
+        # The BLD-305S expects a non-negative speed magnitude; direction is a separate run command.
+        self.write_reg(motor_id, REG_SPEED_SET, max(0, min(abs(int(raw_speed)), 4000)))
 
-    def run(self, motor_id: int) -> None:
+    def run_forward(self, motor_id: int) -> None:
         self.write_reg(motor_id, REG_RUN_CMD, RUN_FORWARD)
+
+    def run_reverse(self, motor_id: int) -> None:
+        self.write_reg(motor_id, REG_RUN_CMD, RUN_REVERSE)
+
+    def run(self, motor_id: int, direction: int = 1) -> None:
+        if int(direction) < 0:
+            self.run_reverse(motor_id)
+            return
+        self.run_forward(motor_id)
 
     def stop(self, motor_id: int) -> None:
         try:
@@ -183,7 +194,7 @@ class Bld305sMotorBus:
             raise first_error
 
     def read_status(self, motor_id: int) -> MotorStatus:
-        actual_speed = decode_signed_16(self.read_reg(motor_id, REG_ACTUAL_SPEED)[0])
+        actual_speed = self.read_reg(motor_id, REG_ACTUAL_SPEED)[0]
         run_status = self.read_reg(motor_id, REG_RUN_STATUS)[0]
         fault_code = self.read_reg(motor_id, REG_FAULT_CODE)[0]
         current_raw = self.read_reg(motor_id, REG_ACTUAL_CURRENT)[0]
@@ -196,4 +207,5 @@ class Bld305sMotorBus:
             current_raw=current_raw,
             voltage_raw=voltage_raw,
         )
+
 

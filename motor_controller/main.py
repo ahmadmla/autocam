@@ -388,11 +388,11 @@ class MotorControllerApp:
         self.motor_bus.set_speed(self.config.motor.pan_motor_id, pan_driver)
         self.motor_bus.set_speed(self.config.motor.truck_motor_id, truck_driver)
         if pan_driver != 0:
-            self.motor_bus.run(self.config.motor.pan_motor_id)
+            self.motor_bus.run(self.config.motor.pan_motor_id, direction=1 if pan_driver > 0 else -1)
         else:
             self.motor_bus.stop(self.config.motor.pan_motor_id)
         if truck_driver != 0:
-            self.motor_bus.run(self.config.motor.truck_motor_id)
+            self.motor_bus.run(self.config.motor.truck_motor_id, direction=1 if truck_driver > 0 else -1)
         else:
             self.motor_bus.stop(self.config.motor.truck_motor_id)
         self.logical_pan_command = command.pan_raw
@@ -546,6 +546,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
