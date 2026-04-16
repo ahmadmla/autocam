@@ -7,6 +7,11 @@ import threading
 import time
 from typing import Dict, Optional
 
+from env_loader import load_repo_env
+
+
+load_repo_env()
+
 import paho.mqtt.client as mqtt
 
 

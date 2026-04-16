@@ -2,6 +2,11 @@ import os
 import re
 from typing import Dict, Tuple
 
+from env_loader import load_repo_env
+
+
+load_repo_env()
+
 
 # Return an environment variable or fall back to the provided default string.
 def env_str(name: str, default: str) -> str:
@@ -114,6 +119,7 @@ MQTT_TOPIC = env_str("MQTT_TOPIC", "uwb/raw/+")
 MQTT_USERNAME = env_str("MQTT_USERNAME", "")
 MQTT_PASSWORD = env_str("MQTT_PASSWORD", "")
 MQTT_QOS = env_int("MQTT_QOS", 0)
+AUTOCAM_POSE_TOPIC_BASE = env_str("AUTOCAM_POSE_TOPIC_BASE", "autocam/pose")
 
 NODE_ID = env_str("NODE_ID", "local")
 OUTPUT_PREFIX = env_str("OUTPUT_PREFIX", "" if NODE_ID == "local" else f"{NODE_ID}_")

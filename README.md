@@ -33,7 +33,7 @@ The dashboard reads `central_history.json` and `anchors.json` to render:
 4. `dashboard.html`
    Displays the room geometry, anchor footprint, current pose, and motion trail from the generated history file.
 5. `run_central_stack.py`
-   Launches the central logger, scheduler, and local static server together from one terminal.
+   Launches the central logger, scheduler, pan/truck motor controller, and local static server together from one terminal.
 
 ## Pose Pipeline
 
@@ -83,7 +83,7 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-For environment setup, start from `.env.example` and replace the sample values with your own broker, node, serial-port, and anchor settings. Anything marked `# CHANGE` is expected to be reviewed before running the stack.
+For environment setup, edit the local untracked `.env` file or start from `.env.example`. The Python entrypoints load `.env` automatically, and shell exports override it, so `export MQTT_HOST=...` still wins for one-off runs. Anything marked `CHANGE` is expected to be reviewed before running the stack.
 
 ## Quick Start
 
@@ -178,6 +178,7 @@ This starts:
 
 - the central pose logger
 - the scheduler
+- the pan/truck motor controller in safe dry-run/unarmed mode by default
 - a local static file server for the dashboard
 
 By default the dashboard is served at:
@@ -244,9 +245,18 @@ Do not use `127.0.0.1` on a node unless that node is intentionally running its o
 - `MQTT_HOST`
 - `MQTT_PORT`
 - `MQTT_TOPIC`
+- `AUTOCAM_POSE_TOPIC_BASE`
+- `AUTOCAM_TARGET_NODE`
 - `CENTRAL_HISTORY_PATH`
 - `ANCHORS_PATH`
 - `VIS_HTTP_PORT`
+
+### Motor controller
+
+- `MOTOR_ENABLE_LIVE` defaults to `0`, so the stack starts in dry-run mode unless explicitly enabled.
+- `MOTOR_ARM_PROMPT` defaults to `0` inside `run_central_stack.py` unless already exported, so arm from MQTT with `AUTOCAM_MOTOR_ARM_TOPIC` or run `python -m motor_controller` directly for an interactive prompt.
+- `PAN_MOTOR_ID=1` controls pan left/right and `TRUCK_MOTOR_ID=2` controls truck motion along the rail.
+- `CAMERA_*`, `PAN_*`, `TRUCK_*`, and `VISION_CORRECTION_*` values are shown in `.env.example`.
 
 Most tuning constants for filtering and solver behavior live in `uwb_pose/config.py`.
 

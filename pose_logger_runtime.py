@@ -17,6 +17,7 @@ except ImportError:
 
 from uwb_pose import geometry as geom_state
 from uwb_pose.config import (
+    AUTOCAM_POSE_TOPIC_BASE,
     FILTER_ALPHA_MAX,
     FILTER_ALPHA_MIN,
     FILTER_BETA_MAX,
@@ -193,7 +194,7 @@ class PoseTracker:
                 },
             )
 
-    # Update the tracker’s belief that the tag is stationary based on innovation, speed, and quality.
+    # Update the tracker???s belief that the tag is stationary based on innovation, speed, and quality.
     def _update_stationary_confidence(
         self,
         raw_innovation_m: float,
@@ -929,6 +930,36 @@ class MqttRawReceiver:
     def on_disconnect(self, client, userdata, disconnect_flags=None, reason_code=None, properties=None):
         emit_log(f"mqtt=disconnected rc={reason_code}")
 
+    # Publish the same stabilized filtered pose used by history/dashboard for motor control.
+    def publish_filtered_pose(self, entry: dict) -> None:
+        node_id = str(entry.get("node_id") or "")
+        pose = entry.get("pose") or {}
+        quality = entry.get("quality") or {}
+        if not node_id or pose.get("x_m") is None or pose.get("y_m") is None:
+            return
+
+        payload = {
+            "node_id": node_id,
+            "timestamp": entry.get("timestamp"),
+            "sequence_number": entry.get("sequence_number"),
+            "pose": {
+                "x_m": pose.get("x_m"),
+                "y_m": pose.get("y_m"),
+            },
+            "quality": {
+                "score": quality.get("score"),
+                "pose_mode": quality.get("pose_mode"),
+                "filter_mode": quality.get("filter_mode"),
+                "stationary_locked": quality.get("stationary_locked", False),
+            },
+        }
+        topic = f"{AUTOCAM_POSE_TOPIC_BASE}/{node_id}"
+        self.client.publish(
+            topic,
+            json.dumps(payload, separators=(",", ":"), allow_nan=False),
+            qos=MQTT_QOS,
+            retain=False,
+        )
     # Decode one MQTT payload and push it through the per-node processing pipeline.
     def on_message(self, client, userdata, msg):
         try:
@@ -948,6 +979,7 @@ class MqttRawReceiver:
             )
             if entry is not None:
                 self.collector.append_entry(entry)
+                self.publish_filtered_pose(entry)
         except Exception as exc:
             emit_log(
                 f"mqtt=message_error topic={msg.topic} "

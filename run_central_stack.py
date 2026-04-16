@@ -11,10 +11,14 @@ from pathlib import Path
 from typing import List, Optional
 from functools import partial
 
+from env_loader import load_repo_env
+
 
 REPO_ROOT = Path(__file__).resolve().parent
 REPO_NAME = REPO_ROOT.name
 SERVER_ROOT = REPO_ROOT.parent
+
+load_repo_env()
 
 
 @dataclass
@@ -50,6 +54,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--skip-server",
         action="store_true",
         help="Run the logger and scheduler without the HTTP server.",
+    )
+    parser.add_argument(
+        "--skip-motor-controller",
+        action="store_true",
+        help="Run the central stack without the pan/truck motor controller.",
     )
     parser.add_argument(
         "--verbose-server",
@@ -172,6 +181,17 @@ def main() -> int:
                 name="scheduler",
                 command=[python_exe, "scheduler.py"],
                 env=base_env.copy(),
+            )
+        )
+
+    if not args.skip_motor_controller:
+        motor_env = base_env.copy()
+        motor_env.setdefault("MOTOR_ARM_PROMPT", "0")
+        processes.append(
+            ManagedProcess(
+                name="motor",
+                command=[python_exe, "-m", "motor_controller"],
+                env=motor_env,
             )
         )
 

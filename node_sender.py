@@ -8,6 +8,11 @@ import time
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
+from env_loader import load_repo_env
+
+
+load_repo_env()
+
 try:
     import serial
 except ImportError:
