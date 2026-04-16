@@ -69,7 +69,10 @@ class ManualMotorSession:
 
     def close(self) -> None:
         try:
-            self.stop()
+            if self.motor_bus.connected:
+                self.stop()
+        except Exception:
+            LOG.exception("manual_close_stop_failed axis=%s", self.axis.axis_name)
         finally:
             self.motor_bus.close()
 
