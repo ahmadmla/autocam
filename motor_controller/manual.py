@@ -64,11 +64,11 @@ class ManualSettings:
     max_raw_speed: int
     max_duration_s: float
     settle_s: float
-    status_poll_s: float
-    print_poll_samples: bool
-    goto_tolerance: float
-    goto_max_steps: int
-    limit_margin: float
+    status_poll_s: float = 0.02
+    print_poll_samples: bool = False
+    goto_tolerance: float = 0.01
+    goto_max_steps: int = 50
+    limit_margin: float = 0.05
 
 
 class ManualMotorSession:
