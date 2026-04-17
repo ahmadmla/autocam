@@ -436,6 +436,7 @@ def print_help(axis_name: str) -> None:
     print("  mark-left        record the current position as the physical left/min limit", flush=True)
     print("  mark-right       record the current position as the physical right/max limit", flush=True)
     print("  set-pos <value>  manually set the estimated position for this session", flush=True)
+    print("  go <value>       move to an absolute target position in the current axis units", flush=True)
     print("  go-left          move to the saved left bound using dedicated conservative goto speed/pulse settings", flush=True)
     print("  go-right         move to the saved right bound using dedicated conservative goto speed/pulse settings", flush=True)
     print("  go-center        move to the center mark when set, otherwise fall back to the midpoint of left/right marks", flush=True)
@@ -548,6 +549,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                     session.print_status()
                 elif command == "set-pos":
                     session.axis.estimated_position = float(parts[1])
+                    session.print_status()
+                elif command == "go":
+                    target_value = float(parts[1])
+                    session.go_to_position(
+                        target_value,
+                        label=f"requested {session.axis.unit_name} position",
+                    )
                     session.print_status()
                 elif command == "go-left":
                     session.go_to_left()
