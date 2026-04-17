@@ -66,6 +66,8 @@ class ManualSettings:
     settle_s: float
     status_poll_s: float
     print_poll_samples: bool
+    goto_tolerance: float
+    goto_max_steps: int
     limit_margin: float
 
 
@@ -139,8 +141,12 @@ class ManualMotorSession:
                 )
         return delta
 
-    def pulse(self, logical_direction: int, *, count: int = 1) -> None:
+    def pulse(self, logical_direction: int, *, count: int = 1, duration_s: Optional[float] = None) -> None:
         count = max(1, int(count))
+        pulse_duration_s = self.settings.jog_duration_s if duration_s is None else min(
+            self.settings.max_duration_s,
+            max(0.02, float(duration_s)),
+        )
         logical_raw = int(logical_direction) * self.settings.jog_raw_speed
         driver_raw = logical_raw * self.axis.driver_sign
         for index in range(count):
@@ -154,9 +160,9 @@ class ManualMotorSession:
                 count,
                 logical_raw,
                 driver_raw,
-                self.settings.jog_duration_s,
+                pulse_duration_s,
             )
-            delta = self._estimate_delta_from_actual_speed(int(logical_direction), self.settings.jog_duration_s)
+            delta = self._estimate_delta_from_actual_speed(int(logical_direction), pulse_duration_s)
             self.stop()
             self.axis.estimated_position += delta
             LOG.info(
@@ -171,6 +177,48 @@ class ManualMotorSession:
             )
             time.sleep(self.settings.settle_s)
             self.check_fault()
+
+    def go_to_position(self, target_position: float, *, label: str) -> None:
+        tolerance = max(0.0, self.settings.goto_tolerance)
+        max_steps = max(1, self.settings.goto_max_steps)
+        nominal_rate = max(1e-9, self.settings.jog_raw_speed * self.axis.units_per_raw_speed_s)
+        for step in range(1, max_steps + 1):
+            error = target_position - self.axis.estimated_position
+            if abs(error) <= tolerance:
+                print(
+                    f"Reached {label}: target_{self.axis.unit_name}={target_position:.4f} "
+                    f"estimated_{self.axis.unit_name}={self.axis.estimated_position:.4f} "
+                    f"error_{self.axis.unit_name}={error:.4f}",
+                    flush=True,
+                )
+                return
+            direction = 1 if error > 0.0 else -1
+            pulse_duration_s = min(
+                self.settings.jog_duration_s,
+                max(0.02, abs(error) / nominal_rate),
+            )
+            print(
+                f"go[{step}/{max_steps}] label={label} target_{self.axis.unit_name}={target_position:.4f} "
+                f"estimated_{self.axis.unit_name}={self.axis.estimated_position:.4f} "
+                f"error_{self.axis.unit_name}={error:.4f} duration_s={pulse_duration_s:.3f}",
+                flush=True,
+            )
+            self.pulse(direction, count=1, duration_s=pulse_duration_s)
+        raise RuntimeError(
+            f"Could not reach {label} within {max_steps} steps. "
+            f"estimated_{self.axis.unit_name}={self.axis.estimated_position:.4f} "
+            f"target_{self.axis.unit_name}={target_position:.4f}"
+        )
+
+    def go_to_center(self) -> None:
+        target = self.axis.bounds_midpoint()
+        label = "bounds midpoint"
+        if target is None:
+            target = self.axis.center_mark
+            label = "startup center mark"
+        if target is None:
+            raise RuntimeError("No center target available. Mark left/right bounds or set a center mark first.")
+        self.go_to_position(target, label=label)
 
     def flip_sign(self) -> None:
         self.axis.driver_sign *= -1
@@ -336,6 +384,7 @@ def print_help(axis_name: str) -> None:
     print("  mark-left        record the current position as the physical left/min limit", flush=True)
     print("  mark-right       record the current position as the physical right/max limit", flush=True)
     print("  set-pos <value>  manually set the estimated position for this session", flush=True)
+    print("  go-center        move to the midpoint of left/right marks, or the center mark if bounds are unavailable", flush=True)
     print("  status           print current status and suggested env values", flush=True)
     print("  stop             send an immediate stop", flush=True)
     print("  save-env         confirm and write the current suggested values into ../.env", flush=True)
@@ -405,6 +454,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                         settle_s=session.settings.settle_s,
                         status_poll_s=session.settings.status_poll_s,
                         print_poll_samples=session.settings.print_poll_samples,
+                        goto_tolerance=session.settings.goto_tolerance,
+                        goto_max_steps=session.settings.goto_max_steps,
                         limit_margin=session.settings.limit_margin,
                     )
                     session.print_status()
@@ -418,6 +469,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                         settle_s=session.settings.settle_s,
                         status_poll_s=session.settings.status_poll_s,
                         print_poll_samples=session.settings.print_poll_samples,
+                        goto_tolerance=session.settings.goto_tolerance,
+                        goto_max_steps=session.settings.goto_max_steps,
                         limit_margin=session.settings.limit_margin,
                     )
                     session.print_status()
@@ -439,6 +492,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                     session.print_status()
                 elif command == "set-pos":
                     session.axis.estimated_position = float(parts[1])
+                    session.print_status()
+                elif command == "go-center":
+                    session.go_to_center()
                     session.print_status()
                 elif command == "status":
                     session.print_status()
