@@ -16,7 +16,7 @@ except ImportError:  # pragma: no cover
     mqtt = None
 
 from .config import RuntimeConfig, load_runtime_config
-from .control import Bld305sMotorBus
+from .control import Bld305sMotorBus, MotorStatus, RUN_FORWARD, RUN_REVERSE
 from .geometry import (
     CameraPoseEstimator,
     ProjectedPoint,
@@ -68,6 +68,8 @@ class MotorControllerApp:
         if mqtt is None:
             raise RuntimeError("paho-mqtt is not installed. Install requirements.txt first.")
         self.config = config
+        if not (config.motor.pan_enabled or config.motor.truck_enabled):
+            raise RuntimeError("At least one motor axis must be enabled.")
         self.pose_estimator = CameraPoseEstimator(config.camera_pose, config.motor)
         self.motor_bus = Bld305sMotorBus(
             port=config.motor.port,
@@ -89,6 +91,7 @@ class MotorControllerApp:
         self.logical_truck_command = 0
         self.driver_pan_command = 0
         self.driver_truck_command = 0
+        self.latest_statuses: Dict[int, MotorStatus] = {}
 
         try:
             self.client = mqtt.Client(
@@ -105,14 +108,20 @@ class MotorControllerApp:
         self.client.reconnect_delay_set(min_delay=1, max_delay=10)
 
     @property
-    def motor_ids(self) -> Tuple[int, int]:
-        return (self.config.motor.pan_motor_id, self.config.motor.truck_motor_id)
+    def motor_ids(self) -> Tuple[int, ...]:
+        motor_ids = []
+        if self.config.motor.pan_enabled:
+            motor_ids.append(self.config.motor.pan_motor_id)
+        if self.config.motor.truck_enabled:
+            motor_ids.append(self.config.motor.truck_motor_id)
+        return tuple(motor_ids)
 
     def stop_motors(self) -> None:
         self.logical_pan_command = 0
         self.logical_truck_command = 0
         self.driver_pan_command = 0
         self.driver_truck_command = 0
+        self.latest_statuses: Dict[int, MotorStatus] = {}
         self.motor_bus.stop_all(self.motor_ids)
 
     def arm(self) -> None:
@@ -300,6 +309,45 @@ class MotorControllerApp:
             int(logical_truck * self.config.motor.truck_sign),
         )
 
+    def _read_statuses(self) -> Dict[int, MotorStatus]:
+        statuses = {motor_id: self.motor_bus.read_status(motor_id) for motor_id in self.motor_ids}
+        self.latest_statuses = statuses
+        return statuses
+
+    @staticmethod
+    def _driver_direction_from_status(status: MotorStatus, fallback_driver_command: int) -> int:
+        if status.run_status == RUN_FORWARD:
+            return 1
+        if status.run_status == RUN_REVERSE:
+            return -1
+        if fallback_driver_command > 0:
+            return 1
+        if fallback_driver_command < 0:
+            return -1
+        return 0
+
+    def _logical_actual_speeds(self, statuses: Dict[int, MotorStatus]) -> Tuple[float, float]:
+        pan_raw = 0.0
+        truck_raw = 0.0
+        if self.config.motor.pan_enabled:
+            status = statuses.get(self.config.motor.pan_motor_id)
+            if status is not None:
+                driver_direction = self._driver_direction_from_status(status, self.driver_pan_command)
+                pan_raw = driver_direction * abs(int(status.actual_speed_raw or 0)) * self.config.motor.pan_sign
+        if self.config.motor.truck_enabled:
+            status = statuses.get(self.config.motor.truck_motor_id)
+            if status is not None:
+                driver_direction = self._driver_direction_from_status(status, self.driver_truck_command)
+                truck_raw = driver_direction * abs(int(status.actual_speed_raw or 0)) * self.config.motor.truck_sign
+        return pan_raw, truck_raw
+
+    @staticmethod
+    def _raise_faults(statuses: Dict[int, MotorStatus]) -> None:
+        faults = [status for status in statuses.values() if status.has_fault]
+        if faults:
+            fault_text = ",".join(f"motor={status.motor_id}:fault={status.fault_code}" for status in faults)
+            raise RuntimeError(f"Driver fault reported: {fault_text}")
+
     def _safe_envelope(self, projected: ProjectedPoint) -> bool:
         margin = self.config.control.safe_image_margin_px
         return (
@@ -318,6 +366,9 @@ class MotorControllerApp:
         target_x, _target_y = self.target_image_center()
         error_x = projected.x_px - target_x
         safe_envelope = self._safe_envelope(projected)
+
+        pan_enabled = self.config.motor.pan_enabled
+        truck_enabled = self.config.motor.truck_enabled
 
         centered = abs(error_x) <= self.config.control.pan_centered_threshold_px
         if centered:
@@ -341,6 +392,38 @@ class MotorControllerApp:
             -self.config.motor.truck_max_raw_speed,
             self.config.motor.truck_max_raw_speed,
         )))
+
+        if truck_enabled and not pan_enabled:
+            mode = "TRUCK_ONLY_TRACK"
+            pan_raw = 0
+            if self.pose_estimator.blocks_truck(truck_raw):
+                truck_raw = 0
+                mode += "_TRUCK_SOFT_LIMIT"
+            truck_raw = self._ramp(self.logical_truck_command, truck_raw, dt_s)
+            return AxisCommand(
+                pan_raw=0,
+                truck_raw=truck_raw,
+                mode=mode,
+                projected=projected,
+                error_x_px=error_x,
+                source=source,
+            )
+
+        if pan_enabled and not truck_enabled:
+            mode = "PAN_ONLY_TRACK"
+            truck_raw = 0
+            if self.pose_estimator.blocks_pan(pan_raw):
+                pan_raw = 0
+                mode += "_PAN_SOFT_LIMIT"
+            pan_raw = self._ramp(self.logical_pan_command, pan_raw, dt_s)
+            return AxisCommand(
+                pan_raw=pan_raw,
+                truck_raw=0,
+                mode=mode,
+                projected=projected,
+                error_x_px=error_x,
+                source=source,
+            )
 
         pan_pose = self.pose_estimator.pose.pan_deg
         pan_outside_preferred = (
@@ -385,27 +468,27 @@ class MotorControllerApp:
 
     def send_command(self, command: AxisCommand) -> None:
         pan_driver, truck_driver = self._driver_commands(command.pan_raw, command.truck_raw)
-        self.motor_bus.set_speed(self.config.motor.pan_motor_id, pan_driver)
-        self.motor_bus.set_speed(self.config.motor.truck_motor_id, truck_driver)
-        if pan_driver != 0:
-            self.motor_bus.run(self.config.motor.pan_motor_id, direction=1 if pan_driver > 0 else -1)
-        else:
-            self.motor_bus.stop(self.config.motor.pan_motor_id)
-        if truck_driver != 0:
-            self.motor_bus.run(self.config.motor.truck_motor_id, direction=1 if truck_driver > 0 else -1)
-        else:
-            self.motor_bus.stop(self.config.motor.truck_motor_id)
+        if self.config.motor.pan_enabled:
+            self.motor_bus.set_speed(self.config.motor.pan_motor_id, pan_driver)
+            if pan_driver != 0:
+                self.motor_bus.run(self.config.motor.pan_motor_id, direction=1 if pan_driver > 0 else -1)
+            else:
+                self.motor_bus.stop(self.config.motor.pan_motor_id)
+        if self.config.motor.truck_enabled:
+            self.motor_bus.set_speed(self.config.motor.truck_motor_id, truck_driver)
+            if truck_driver != 0:
+                self.motor_bus.run(self.config.motor.truck_motor_id, direction=1 if truck_driver > 0 else -1)
+            else:
+                self.motor_bus.stop(self.config.motor.truck_motor_id)
         self.logical_pan_command = command.pan_raw
         self.logical_truck_command = command.truck_raw
         self.driver_pan_command = pan_driver
         self.driver_truck_command = truck_driver
 
-    def check_driver_faults(self) -> None:
-        statuses = [self.motor_bus.read_status(motor_id) for motor_id in self.motor_ids]
-        faults = [status for status in statuses if status.has_fault]
-        if faults:
-            fault_text = ",".join(f"motor={status.motor_id}:fault={status.fault_code}" for status in faults)
-            raise RuntimeError(f"Driver fault reported: {fault_text}")
+    def check_driver_faults(self, statuses: Optional[Dict[int, MotorStatus]] = None) -> None:
+        if statuses is None:
+            statuses = self._read_statuses()
+        self._raise_faults(statuses)
 
     def log_tick(self, command: AxisCommand, target: Optional[FilteredPoseMessage], now: float) -> None:
         if now - self.last_log_monotonic < 1.0:
@@ -461,24 +544,28 @@ class MotorControllerApp:
         else:
             dt_s = clamp(now - self.last_loop_monotonic, 0.0, 0.25)
         self.last_loop_monotonic = now
-        self.pose_estimator.update(dt_s, self.logical_pan_command, self.logical_truck_command)
-
-        if not self.armed or not self.pose_estimator.valid or not self.mqtt_connected:
-            self.stop_motors()
-            self.log_tick(AxisCommand(0, 0, "UNARMED_INVALID_POSE", None, None, "none"), None, now)
-            return
-
-        target = self.get_selected_pose(now)
-        if target is None:
-            self.stop_motors()
-            self.log_tick(AxisCommand(0, 0, "NO_VALID_FILTERED_TARGET", None, None, "none"), None, now)
-            return
 
         try:
-            self.check_driver_faults()
+            statuses = self._read_statuses()
+            actual_pan_raw, actual_truck_raw = self._logical_actual_speeds(statuses)
+            self.pose_estimator.update(dt_s, actual_pan_raw, actual_truck_raw)
+
+            if not self.armed or not self.pose_estimator.valid or not self.mqtt_connected:
+                self.stop_motors()
+                self.log_tick(AxisCommand(0, 0, "UNARMED_INVALID_POSE", None, None, "none"), None, now)
+                return
+
+            target = self.get_selected_pose(now)
+            if target is None:
+                self.stop_motors()
+                self.log_tick(AxisCommand(0, 0, "NO_VALID_FILTERED_TARGET", None, None, "none"), None, now)
+                return
+
+            self.check_driver_faults(statuses)
             command = self.build_command(target, now, dt_s)
             self.send_command(command)
-            self.check_driver_faults()
+            post_statuses = self._read_statuses()
+            self.check_driver_faults(post_statuses)
             self.log_tick(command, target, now)
         except ProjectionError as exc:
             LOG.warning("projection_rejected selected=%s reason=%s", self.selected_node, exc)
@@ -523,12 +610,14 @@ def main() -> None:
     setup_logging()
     config = load_runtime_config()
     LOG.warning(
-        "motor_controller=start live=%s selected=%s camera=%s %sx%s pan_motor=%s truck_motor=%s",
+        "motor_controller=start live=%s selected=%s camera=%s %sx%s pan_enabled=%s truck_enabled=%s pan_motor=%s truck_motor=%s",
         int(config.motor.enable_live),
         config.mqtt.target_node,
         config.camera.profile,
         config.camera.image_w,
         config.camera.image_h,
+        int(config.motor.pan_enabled),
+        int(config.motor.truck_enabled),
         config.motor.pan_motor_id,
         config.motor.truck_motor_id,
     )

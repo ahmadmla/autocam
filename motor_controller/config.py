@@ -86,6 +86,8 @@ class MotorRuntimeConfig:
     port: str
     baudrate: int
     timeout_s: float
+    pan_enabled: bool
+    truck_enabled: bool
     pan_motor_id: int
     truck_motor_id: int
     pan_sign: int
@@ -214,6 +216,8 @@ def load_runtime_config() -> RuntimeConfig:
         port=env_str("MOTOR_MODBUS_PORT", "/dev/ttyUSB0"),
         baudrate=env_int("MOTOR_MODBUS_BAUD", 9600),
         timeout_s=env_float("MOTOR_MODBUS_TIMEOUT_S", 1.0),
+        pan_enabled=env_bool("PAN_ENABLED", True),
+        truck_enabled=env_bool("TRUCK_ENABLED", True),
         pan_motor_id=env_int("PAN_MOTOR_ID", 1),
         truck_motor_id=env_int("TRUCK_MOTOR_ID", 2),
         pan_sign=_signed_env_int("PAN_SIGN", 1),

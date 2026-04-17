@@ -64,6 +64,7 @@ class ManualSettings:
     max_raw_speed: int
     max_duration_s: float
     settle_s: float
+    status_poll_s: float
     limit_margin: float
 
 
@@ -105,6 +106,29 @@ class ManualMotorSession:
         if status.has_fault:
             raise RuntimeError(f"Driver fault on motor {status.motor_id}: code={status.fault_code}")
 
+    def _estimate_delta_from_actual_speed(self, logical_direction: int, duration_s: float) -> float:
+        logical_sign = 1.0 if logical_direction >= 0 else -1.0
+        if not self.live:
+            logical_raw = int(logical_direction) * self.settings.jog_raw_speed
+            return logical_raw * self.axis.units_per_raw_speed_s * duration_s
+
+        end_t = time.monotonic() + max(0.0, duration_s)
+        last_t = time.monotonic()
+        delta = 0.0
+        while True:
+            now = time.monotonic()
+            remaining = end_t - now
+            if remaining <= 0.0:
+                break
+            time.sleep(min(self.settings.status_poll_s, remaining))
+            status = self.read_status()
+            sample_t = time.monotonic()
+            dt = max(0.0, sample_t - last_t)
+            last_t = sample_t
+            actual_raw = abs(int(status.actual_speed_raw or 0))
+            delta += logical_sign * actual_raw * self.axis.units_per_raw_speed_s * dt
+        return delta
+
     def pulse(self, logical_direction: int, *, count: int = 1) -> None:
         count = max(1, int(count))
         logical_raw = int(logical_direction) * self.settings.jog_raw_speed
@@ -122,9 +146,19 @@ class ManualMotorSession:
                 driver_raw,
                 self.settings.jog_duration_s,
             )
-            time.sleep(self.settings.jog_duration_s)
+            delta = self._estimate_delta_from_actual_speed(int(logical_direction), self.settings.jog_duration_s)
             self.stop()
-            self.axis.apply_logical_pulse(logical_raw, self.settings.jog_duration_s)
+            self.axis.estimated_position += delta
+            LOG.info(
+                "manual_motion_estimate axis=%s step=%s/%s delta_%s=%.4f estimated_%s=%.4f",
+                self.axis.axis_name,
+                index + 1,
+                count,
+                self.axis.unit_name,
+                delta,
+                self.axis.unit_name,
+                self.axis.estimated_position,
+            )
             time.sleep(self.settings.settle_s)
             self.check_fault()
 
@@ -141,7 +175,8 @@ class ManualMotorSession:
         )
         print(
             f"jog_raw_speed={self.settings.jog_raw_speed} jog_duration_s={self.settings.jog_duration_s:.3f} "
-            f"settle_s={self.settings.settle_s:.3f} actual_speed_raw={status.actual_speed_raw} fault={status.fault_code}",
+            f"settle_s={self.settings.settle_s:.3f} status_poll_s={self.settings.status_poll_s:.3f} "
+            f"actual_speed_raw={status.actual_speed_raw} fault={status.fault_code}",
             flush=True,
         )
         if self.axis.left_mark is not None:
@@ -251,6 +286,7 @@ def load_manual_settings(default_speed: int) -> ManualSettings:
         max_raw_speed=max_raw_speed,
         max_duration_s=max_duration_s,
         settle_s=max(0.0, env_float("MOTOR_MANUAL_SETTLE_S", 0.20)),
+        status_poll_s=max(0.01, env_float("MOTOR_MANUAL_STATUS_POLL_S", 0.02)),
         limit_margin=max(0.0, env_float("MOTOR_MANUAL_LIMIT_MARGIN_M", 0.05)),
     )
 
@@ -356,6 +392,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                         max_raw_speed=session.settings.max_raw_speed,
                         max_duration_s=session.settings.max_duration_s,
                         settle_s=session.settings.settle_s,
+                        status_poll_s=session.settings.status_poll_s,
                         limit_margin=session.settings.limit_margin,
                     )
                     session.print_status()
@@ -367,6 +404,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                         max_raw_speed=session.settings.max_raw_speed,
                         max_duration_s=session.settings.max_duration_s,
                         settle_s=session.settings.settle_s,
+                        status_poll_s=session.settings.status_poll_s,
                         limit_margin=session.settings.limit_margin,
                     )
                     session.print_status()
@@ -427,6 +465,4 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-
 
