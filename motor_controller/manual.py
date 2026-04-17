@@ -68,6 +68,7 @@ class ManualSettings:
     settle_s: float
     status_poll_s: float = 0.02
     print_poll_samples: bool = False
+    goto_max_duration_s: float = 0.10
     goto_tolerance: float = 0.01
     goto_max_steps: int = 50
     limit_margin: float = 0.05
@@ -143,13 +144,24 @@ class ManualMotorSession:
                 )
         return delta
 
-    def pulse(self, logical_direction: int, *, count: int = 1, duration_s: Optional[float] = None) -> None:
+    def pulse(
+        self,
+        logical_direction: int,
+        *,
+        count: int = 1,
+        duration_s: Optional[float] = None,
+        raw_speed: Optional[int] = None,
+    ) -> None:
         count = max(1, int(count))
         pulse_duration_s = self.settings.jog_duration_s if duration_s is None else min(
             self.settings.max_duration_s,
             max(0.02, float(duration_s)),
         )
-        logical_raw = int(logical_direction) * self.settings.jog_raw_speed
+        pulse_raw_speed = self.settings.jog_raw_speed if raw_speed is None else min(
+            self.settings.max_raw_speed,
+            max(1, abs(int(raw_speed))),
+        )
+        logical_raw = int(logical_direction) * pulse_raw_speed
         driver_raw = logical_raw * self.axis.driver_sign
         for index in range(count):
             self.check_fault()
@@ -183,7 +195,8 @@ class ManualMotorSession:
     def go_to_position(self, target_position: float, *, label: str) -> None:
         tolerance = max(0.0, self.settings.goto_tolerance)
         max_steps = max(1, self.settings.goto_max_steps)
-        nominal_rate = max(1e-9, self.settings.jog_raw_speed * self.axis.units_per_raw_speed_s)
+        goto_max_duration_s = min(self.settings.max_duration_s, max(0.02, self.settings.goto_max_duration_s))
+        max_raw_speed = min(self.settings.max_raw_speed, max(1, self.settings.jog_raw_speed))
         for step in range(1, max_steps + 1):
             error = target_position - self.axis.estimated_position
             if abs(error) <= tolerance:
@@ -195,17 +208,20 @@ class ManualMotorSession:
                 )
                 return
             direction = 1 if error > 0.0 else -1
+            raw_speed_from_error = int(round(abs(error) / max(self.axis.units_per_raw_speed_s * goto_max_duration_s, 1e-9)))
+            pulse_raw_speed = min(max_raw_speed, max(1, raw_speed_from_error))
+            nominal_rate = max(1e-9, pulse_raw_speed * self.axis.units_per_raw_speed_s)
             pulse_duration_s = min(
-                self.settings.jog_duration_s,
+                goto_max_duration_s,
                 max(0.02, abs(error) / nominal_rate),
             )
             print(
                 f"go[{step}/{max_steps}] label={label} target_{self.axis.unit_name}={target_position:.4f} "
                 f"estimated_{self.axis.unit_name}={self.axis.estimated_position:.4f} "
-                f"error_{self.axis.unit_name}={error:.4f} duration_s={pulse_duration_s:.3f}",
+                f"error_{self.axis.unit_name}={error:.4f} raw_speed={pulse_raw_speed} duration_s={pulse_duration_s:.3f}",
                 flush=True,
             )
-            self.pulse(direction, count=1, duration_s=pulse_duration_s)
+            self.pulse(direction, count=1, duration_s=pulse_duration_s, raw_speed=pulse_raw_speed)
         raise RuntimeError(
             f"Could not reach {label} within {max_steps} steps. "
             f"estimated_{self.axis.unit_name}={self.axis.estimated_position:.4f} "
@@ -370,6 +386,7 @@ def load_manual_settings(default_speed: int) -> ManualSettings:
     max_duration_s = max(0.02, env_float("MOTOR_MANUAL_MAX_DURATION_S", 0.30))
     requested_duration = env_float("MOTOR_MANUAL_JOG_DURATION_S", 0.10)
     jog_duration_s = min(max_duration_s, max(0.02, requested_duration))
+    goto_max_duration_s = min(max_duration_s, max(0.02, env_float("MOTOR_MANUAL_GOTO_MAX_DURATION_S", min(jog_duration_s, 0.10))))
     return ManualSettings(
         jog_raw_speed=jog_raw_speed,
         jog_duration_s=jog_duration_s,
@@ -378,6 +395,7 @@ def load_manual_settings(default_speed: int) -> ManualSettings:
         settle_s=max(0.0, env_float("MOTOR_MANUAL_SETTLE_S", 0.20)),
         status_poll_s=max(0.01, env_float("MOTOR_MANUAL_STATUS_POLL_S", 0.02)),
         print_poll_samples=env_bool("MOTOR_MANUAL_PRINT_POLL_SAMPLES", False),
+        goto_max_duration_s=goto_max_duration_s,
         goto_tolerance=max(0.0, env_float("MOTOR_MANUAL_GOTO_TOLERANCE", 0.01)),
         goto_max_steps=max(1, env_int("MOTOR_MANUAL_GOTO_MAX_STEPS", 50)),
         limit_margin=max(0.0, env_float("MOTOR_MANUAL_LIMIT_MARGIN_M", 0.05)),
@@ -418,8 +436,8 @@ def print_help(axis_name: str) -> None:
     print("  mark-left        record the current position as the physical left/min limit", flush=True)
     print("  mark-right       record the current position as the physical right/max limit", flush=True)
     print("  set-pos <value>  manually set the estimated position for this session", flush=True)
-    print("  go-left          move to the saved left bound using the inward safety margin when available", flush=True)
-    print("  go-right         move to the saved right bound using the inward safety margin when available", flush=True)
+    print("  go-left          move to the saved left bound using dedicated conservative goto speed/pulse settings", flush=True)
+    print("  go-right         move to the saved right bound using dedicated conservative goto speed/pulse settings", flush=True)
     print("  go-center        move to the midpoint of left/right marks, or the center mark if bounds are unavailable", flush=True)
     print("  status           print current status and suggested env values", flush=True)
     print("  stop             send an immediate stop", flush=True)
@@ -490,6 +508,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                         settle_s=session.settings.settle_s,
                         status_poll_s=session.settings.status_poll_s,
                         print_poll_samples=session.settings.print_poll_samples,
+                        goto_max_duration_s=session.settings.goto_max_duration_s,
                         goto_tolerance=session.settings.goto_tolerance,
                         goto_max_steps=session.settings.goto_max_steps,
                         limit_margin=session.settings.limit_margin,
@@ -505,6 +524,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                         settle_s=session.settings.settle_s,
                         status_poll_s=session.settings.status_poll_s,
                         print_poll_samples=session.settings.print_poll_samples,
+                        goto_max_duration_s=session.settings.goto_max_duration_s,
                         goto_tolerance=session.settings.goto_tolerance,
                         goto_max_steps=session.settings.goto_max_steps,
                         limit_margin=session.settings.limit_margin,
