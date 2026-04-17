@@ -7,7 +7,7 @@ import logging
 import math
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional
 
@@ -99,6 +99,7 @@ class ManualSettings:
     jog_raw_speed: int
     jog_duration_s: float
     max_raw_speed: int
+    goto_max_raw_speed: int
     max_duration_s: float
     settle_s: float
     status_poll_s: float = 0.02
@@ -107,6 +108,9 @@ class ManualSettings:
     goto_tolerance: float = 0.01
     goto_max_steps: int = 50
     limit_margin: float = 0.05
+    goto_speed_factor: float = 1.0
+    goto_min_raw_speed: int = 1
+    confirm_limit_override: bool = True
 
 
 class ManualMotorSession:
@@ -160,7 +164,8 @@ class ManualMotorSession:
                 completed_command = self._runtime_command_buffer.strip()
                 self._runtime_command_buffer = ""
             elif ch == "\003":
-                raise KeyboardInterrupt
+                self.stop()
+                raise MotionInterrupted("Motion stopped by Ctrl+C.")
             elif ch in ("\b", "\x7f"):
                 if self._runtime_command_buffer:
                     self._runtime_command_buffer = self._runtime_command_buffer[:-1]
@@ -200,15 +205,19 @@ class ManualMotorSession:
         self,
         requested_logical_direction: int,
         duration_s: float,
+        *,
+        enforce_limits: bool = True,
     ) -> float:
         logical_sign = 1.0 if requested_logical_direction >= 0 else -1.0
         if not self.live:
             logical_raw = int(requested_logical_direction) * self.settings.jog_raw_speed
             delta = logical_raw * self.axis.units_per_raw_speed_s * duration_s
-            remaining_travel = self.axis.remaining_travel(
-                int(logical_sign),
-                self.settings.limit_margin,
-            )
+            remaining_travel = None
+            if enforce_limits:
+                remaining_travel = self.axis.remaining_travel(
+                    int(logical_sign),
+                    self.settings.limit_margin,
+                )
             if remaining_travel is not None:
                 delta = logical_sign * min(abs(delta), max(0.0, remaining_travel))
             self.axis.estimated_position += delta
@@ -240,11 +249,13 @@ class ManualMotorSession:
                 * self.axis.units_per_raw_speed_s
                 * dt
             )
-            remaining_travel = self.axis.remaining_travel(
-                actual_logical_direction,
-                self.settings.limit_margin,
-            )
+            remaining_travel = None
             hit_active_bound = False
+            if enforce_limits:
+                remaining_travel = self.axis.remaining_travel(
+                    actual_logical_direction,
+                    self.settings.limit_margin,
+                )
             if remaining_travel is not None:
                 remaining_travel = max(0.0, remaining_travel)
                 sample_delta = actual_logical_direction * min(
@@ -272,6 +283,43 @@ class ManualMotorSession:
                 )
         return delta
 
+    def _confirm_pulse_limit_override(
+        self,
+        logical_direction: int,
+        *,
+        pulse_raw_speed: int,
+        pulse_duration_s: float,
+        remaining_travel: Optional[float],
+    ) -> bool:
+        limit_name = "min" if logical_direction < 0 else "max"
+        estimated_step = pulse_raw_speed * self.axis.units_per_raw_speed_s * pulse_duration_s
+        remaining_value = None if remaining_travel is None else max(0.0, remaining_travel)
+        estimated_overrun = None
+        if remaining_value is not None:
+            estimated_overrun = max(0.0, estimated_step - remaining_value)
+        print(
+            f"Estimated pulse would cross the active {self.axis.axis_name} {limit_name} bound: "
+            f"estimated_step_{self.axis.unit_name}={estimated_step:.4f} "
+            f"remaining_{self.axis.unit_name}="
+            f"{'unbounded' if remaining_value is None else f'{remaining_value:.4f}'} "
+            f"estimated_{self.axis.unit_name}={self.axis.estimated_position:.4f}",
+            flush=True,
+        )
+        if estimated_overrun is not None:
+            print(
+                f"Estimated overrun_{self.axis.unit_name}={estimated_overrun:.4f}",
+                flush=True,
+            )
+        if not self.settings.confirm_limit_override:
+            return False
+        if not sys.stdin.isatty():
+            raise RuntimeError(
+                "Pulse would exceed the active estimated bound, but no interactive terminal is available "
+                "to confirm the override."
+            )
+        confirm = input("Type OVERRIDE to continue past the estimated bound: ").strip()
+        return confirm == "OVERRIDE"
+
     def pulse(
         self,
         logical_direction: int,
@@ -296,20 +344,26 @@ class ManualMotorSession:
                 int(logical_direction),
                 self.settings.limit_margin,
             )
-            if remaining_travel is not None and remaining_travel <= 0.0:
-                raise RuntimeError(
-                    f"Requested move would exceed active {self.axis.axis_name} bounds. "
-                    f"estimated_{self.axis.unit_name}={self.axis.estimated_position:.4f}"
-                )
             step_duration_s = pulse_duration_s
             step_rate = pulse_raw_speed * self.axis.units_per_raw_speed_s
-            if remaining_travel is not None and step_rate > 1e-9:
-                step_duration_s = min(step_duration_s, remaining_travel / step_rate)
-                if step_duration_s <= 1e-4:
-                    raise RuntimeError(
-                        f"Requested move is within the active {self.axis.axis_name} bound margin. "
-                        f"estimated_{self.axis.unit_name}={self.axis.estimated_position:.4f}"
+            enforce_limits = True
+            estimated_crosses_bound = (
+                remaining_travel is not None
+                and (
+                    remaining_travel <= 0.0
+                    or (step_rate > 1e-9 and pulse_duration_s > (remaining_travel / step_rate))
+                )
             )
+            if estimated_crosses_bound:
+                if not self._confirm_pulse_limit_override(
+                    int(logical_direction),
+                    pulse_raw_speed=pulse_raw_speed,
+                    pulse_duration_s=pulse_duration_s,
+                    remaining_travel=remaining_travel,
+                ):
+                    print("Pulse cancelled.", flush=True)
+                    return
+                enforce_limits = False
             self.check_fault()
             self.motor_bus.set_speed(self.axis.motor_id, driver_raw)
             self.motor_bus.run(self.axis.motor_id, direction=1 if driver_raw > 0 else -1)
@@ -325,6 +379,7 @@ class ManualMotorSession:
             delta = self._estimate_delta_from_actual_speed(
                 int(logical_direction),
                 step_duration_s,
+                enforce_limits=enforce_limits,
             )
             self.stop()
             LOG.info(
@@ -355,7 +410,10 @@ class ManualMotorSession:
             )
         tolerance = max(0.0, self.settings.goto_tolerance)
         goto_max_duration_s = min(self.settings.max_duration_s, max(0.02, self.settings.goto_max_duration_s))
-        max_raw_speed = min(self.settings.max_raw_speed, max(1, self.settings.jog_raw_speed))
+        goto_max_raw_speed = min(
+            self.settings.max_raw_speed,
+            max(self.settings.goto_min_raw_speed, self.settings.goto_max_raw_speed),
+        )
         control_dt_s = max(0.01, self.settings.status_poll_s)
         max_runtime_s = max(0.25, self.settings.goto_max_steps * goto_max_duration_s)
         deadline = time.monotonic() + max_runtime_s
@@ -395,9 +453,14 @@ class ManualMotorSession:
                     )
 
                 raw_speed_from_error = int(round(
-                    abs(error) / max(self.axis.units_per_raw_speed_s * goto_max_duration_s, 1e-9)
+                    self.settings.goto_speed_factor
+                    * abs(error)
+                    / max(self.axis.units_per_raw_speed_s * goto_max_duration_s, 1e-9)
                 ))
-                command_raw_speed = min(max_raw_speed, max(1, raw_speed_from_error))
+                command_raw_speed = min(
+                    goto_max_raw_speed,
+                    max(self.settings.goto_min_raw_speed, raw_speed_from_error),
+                )
                 driver_direction = direction * self.axis.driver_sign
                 if (
                     command_raw_speed != current_raw_speed
@@ -540,7 +603,11 @@ class ManualMotorSession:
         )
         print(
             f"jog_raw_speed={self.settings.jog_raw_speed} jog_duration_s={self.settings.jog_duration_s:.3f} "
+            f"goto_min_raw_speed={self.settings.goto_min_raw_speed} goto_max_raw_speed={self.settings.goto_max_raw_speed} "
+            f"goto_speed_factor={self.settings.goto_speed_factor:.2f} "
+            f"confirm_limit_override={int(self.settings.confirm_limit_override)} "
             f"settle_s={self.settings.settle_s:.3f} status_poll_s={self.settings.status_poll_s:.3f} "
+            f"units_per_raw_speed_s={self.axis.units_per_raw_speed_s:.8f} "
             f"print_poll_samples={int(self.settings.print_poll_samples)} actual_speed_raw={status.actual_speed_raw} fault={status.fault_code}",
             flush=True,
         )
@@ -628,7 +695,10 @@ def build_axis_state(axis_name: str) -> ManualAxisState:
             axis_name="truck",
             motor_id=config.motor.truck_motor_id,
             driver_sign=config.motor.truck_sign,
-            units_per_raw_speed_s=config.motor.truck_m_per_raw_speed_s,
+            units_per_raw_speed_s=env_float(
+                "MOTOR_MANUAL_TRUCK_M_PER_RAW_SPEED_S",
+                config.motor.truck_m_per_raw_speed_s,
+            ),
             estimated_position=config.camera_pose.start_x_m,
             unit_name="x_m",
             configured_left_limit=config.motor.truck_min_x_m,
@@ -639,7 +709,10 @@ def build_axis_state(axis_name: str) -> ManualAxisState:
             axis_name="pan",
             motor_id=config.motor.pan_motor_id,
             driver_sign=config.motor.pan_sign,
-            units_per_raw_speed_s=config.motor.pan_deg_per_raw_speed_s,
+            units_per_raw_speed_s=env_float(
+                "MOTOR_MANUAL_PAN_DEG_PER_RAW_SPEED_S",
+                config.motor.pan_deg_per_raw_speed_s,
+            ),
             estimated_position=config.camera_pose.start_pan_deg,
             unit_name="deg",
             configured_left_limit=config.motor.pan_min_deg,
@@ -652,6 +725,15 @@ def load_manual_settings(default_speed: int) -> ManualSettings:
     max_raw_speed = max(1, env_int("MOTOR_MANUAL_MAX_RAW_SPEED", 20))
     requested_speed = abs(env_int("MOTOR_MANUAL_JOG_RAW_SPEED", default_speed))
     jog_raw_speed = min(max_raw_speed, max(1, requested_speed))
+    default_goto_min_raw_speed = min(max_raw_speed, max(1, jog_raw_speed // 4))
+    goto_min_raw_speed = min(
+        max_raw_speed,
+        max(1, env_int("MOTOR_MANUAL_GOTO_MIN_RAW_SPEED", default_goto_min_raw_speed)),
+    )
+    goto_max_raw_speed = min(
+        max_raw_speed,
+        max(goto_min_raw_speed, env_int("MOTOR_MANUAL_GOTO_MAX_RAW_SPEED", max_raw_speed)),
+    )
     max_duration_s = max(0.02, env_float("MOTOR_MANUAL_MAX_DURATION_S", 0.30))
     requested_duration = env_float("MOTOR_MANUAL_JOG_DURATION_S", 0.10)
     jog_duration_s = min(max_duration_s, max(0.02, requested_duration))
@@ -660,6 +742,7 @@ def load_manual_settings(default_speed: int) -> ManualSettings:
         jog_raw_speed=jog_raw_speed,
         jog_duration_s=jog_duration_s,
         max_raw_speed=max_raw_speed,
+        goto_max_raw_speed=goto_max_raw_speed,
         max_duration_s=max_duration_s,
         settle_s=max(0.0, env_float("MOTOR_MANUAL_SETTLE_S", 0.20)),
         status_poll_s=max(0.01, env_float("MOTOR_MANUAL_STATUS_POLL_S", 0.02)),
@@ -668,6 +751,9 @@ def load_manual_settings(default_speed: int) -> ManualSettings:
         goto_tolerance=max(0.0, env_float("MOTOR_MANUAL_GOTO_TOLERANCE", 0.01)),
         goto_max_steps=max(1, env_int("MOTOR_MANUAL_GOTO_MAX_STEPS", 50)),
         limit_margin=max(0.0, env_float("MOTOR_MANUAL_LIMIT_MARGIN_M", 0.05)),
+        goto_speed_factor=max(0.1, env_float("MOTOR_MANUAL_GOTO_SPEED_FACTOR", 1.5)),
+        goto_min_raw_speed=goto_min_raw_speed,
+        confirm_limit_override=env_bool("MOTOR_MANUAL_CONFIRM_LIMIT_OVERRIDE", True),
     )
 
 
@@ -697,6 +783,7 @@ def print_help(axis_name: str) -> None:
     print("  n                jog in the negative logical direction once", flush=True)
     print("  p <count>        repeat positive jog count times", flush=True)
     print("  n <count>        repeat negative jog count times", flush=True)
+    print("                   if a pulse is estimated to cross a bound, you can type OVERRIDE to allow it", flush=True)
     print("  speed <raw>      set jog raw speed (clamped to MOTOR_MANUAL_MAX_RAW_SPEED)", flush=True)
     print("  duration <sec>   set jog duration (clamped to MOTOR_MANUAL_MAX_DURATION_S)", flush=True)
     print("  flip-sign        invert runtime motor sign without editing .env", flush=True)
@@ -770,34 +857,22 @@ def main(argv: Optional[list[str]] = None) -> int:
                     session.print_status()
                 elif command == "speed":
                     requested = abs(int(parts[1]))
-                    session.settings = ManualSettings(
-                        jog_raw_speed=min(session.settings.max_raw_speed, max(1, requested)),
-                        jog_duration_s=session.settings.jog_duration_s,
-                        max_raw_speed=session.settings.max_raw_speed,
-                        max_duration_s=session.settings.max_duration_s,
-                        settle_s=session.settings.settle_s,
-                        status_poll_s=session.settings.status_poll_s,
-                        print_poll_samples=session.settings.print_poll_samples,
-                        goto_max_duration_s=session.settings.goto_max_duration_s,
-                        goto_tolerance=session.settings.goto_tolerance,
-                        goto_max_steps=session.settings.goto_max_steps,
-                        limit_margin=session.settings.limit_margin,
+                    next_jog_raw_speed = min(session.settings.max_raw_speed, max(1, requested))
+                    next_goto_min_raw_speed = min(
+                        session.settings.goto_max_raw_speed,
+                        max(1, next_jog_raw_speed // 4),
+                    )
+                    session.settings = replace(
+                        session.settings,
+                        jog_raw_speed=next_jog_raw_speed,
+                        goto_min_raw_speed=next_goto_min_raw_speed,
                     )
                     session.print_status()
                 elif command == "duration":
                     requested = float(parts[1])
-                    session.settings = ManualSettings(
-                        jog_raw_speed=session.settings.jog_raw_speed,
+                    session.settings = replace(
+                        session.settings,
                         jog_duration_s=min(session.settings.max_duration_s, max(0.02, requested)),
-                        max_raw_speed=session.settings.max_raw_speed,
-                        max_duration_s=session.settings.max_duration_s,
-                        settle_s=session.settings.settle_s,
-                        status_poll_s=session.settings.status_poll_s,
-                        print_poll_samples=session.settings.print_poll_samples,
-                        goto_max_duration_s=session.settings.goto_max_duration_s,
-                        goto_tolerance=session.settings.goto_tolerance,
-                        goto_max_steps=session.settings.goto_max_steps,
-                        limit_margin=session.settings.limit_margin,
                     )
                     session.print_status()
                 elif command == "flip-sign":
