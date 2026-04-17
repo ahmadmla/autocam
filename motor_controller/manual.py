@@ -229,11 +229,11 @@ class ManualMotorSession:
         )
 
     def go_to_center(self) -> None:
-        target = self.axis.bounds_midpoint()
-        label = "bounds midpoint"
+        target = self.axis.center_mark
+        label = "startup center mark"
         if target is None:
-            target = self.axis.center_mark
-            label = "startup center mark"
+            target = self.axis.bounds_midpoint()
+            label = "bounds midpoint"
         if target is None:
             raise RuntimeError("No center target available. Mark left/right bounds or set a center mark first.")
         self.go_to_position(target, label=label)
@@ -438,7 +438,7 @@ def print_help(axis_name: str) -> None:
     print("  set-pos <value>  manually set the estimated position for this session", flush=True)
     print("  go-left          move to the saved left bound using dedicated conservative goto speed/pulse settings", flush=True)
     print("  go-right         move to the saved right bound using dedicated conservative goto speed/pulse settings", flush=True)
-    print("  go-center        move to the midpoint of left/right marks, or the center mark if bounds are unavailable", flush=True)
+    print("  go-center        move to the center mark when set, otherwise fall back to the midpoint of left/right marks", flush=True)
     print("  status           print current status and suggested env values", flush=True)
     print("  stop             send an immediate stop", flush=True)
     print("  save-env         confirm and write the current suggested values into ../.env", flush=True)
