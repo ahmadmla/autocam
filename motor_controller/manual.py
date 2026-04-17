@@ -26,6 +26,15 @@ else:
 
 LOG = logging.getLogger("motor_manual")
 
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - Windows-only interactive stop support.
+    msvcrt = None
+
+
+class MotionInterrupted(RuntimeError):
+    """Raised when the operator stops an in-progress manual motion."""
+
 
 @dataclass
 class ManualAxisState:
@@ -111,6 +120,7 @@ class ManualMotorSession:
             live=live,
         )
         self.live = live
+        self._runtime_command_buffer = ""
 
     def connect(self) -> None:
         self.motor_bus.connect()
@@ -137,6 +147,40 @@ class ManualMotorSession:
         status = self.read_status()
         if status.has_fault:
             raise RuntimeError(f"Driver fault on motor {status.motor_id}: code={status.fault_code}")
+
+    def _poll_runtime_command(self) -> Optional[str]:
+        if msvcrt is None or not sys.stdin.isatty():
+            return None
+
+        completed_command = None
+        while msvcrt.kbhit():
+            ch = msvcrt.getwche()
+            if ch in ("\r", "\n"):
+                print("", flush=True)
+                completed_command = self._runtime_command_buffer.strip()
+                self._runtime_command_buffer = ""
+            elif ch == "\003":
+                raise KeyboardInterrupt
+            elif ch in ("\b", "\x7f"):
+                if self._runtime_command_buffer:
+                    self._runtime_command_buffer = self._runtime_command_buffer[:-1]
+                    print(" \b", end="", flush=True)
+            else:
+                self._runtime_command_buffer += ch
+        return completed_command
+
+    def _check_runtime_stop(self) -> None:
+        command = self._poll_runtime_command()
+        if command is None:
+            return
+        if command.lower() == "stop":
+            self.stop()
+            raise MotionInterrupted("Motion stopped by operator.")
+        print(
+            f"Ignoring runtime command during motion: {command!r}. "
+            "Type stop and press Enter to stop.",
+            flush=True,
+        )
 
     def _logical_direction_from_status(
         self,
@@ -179,6 +223,7 @@ class ManualMotorSession:
             remaining = end_t - now
             if remaining <= 0.0:
                 break
+            self._check_runtime_stop()
             time.sleep(min(self.settings.status_poll_s, remaining))
             status = self.read_status()
             sample_t = time.monotonic()
@@ -321,6 +366,7 @@ class ManualMotorSession:
 
         try:
             while True:
+                self._check_runtime_stop()
                 error = target_position - self.axis.estimated_position
                 if abs(error) <= tolerance:
                     self.stop()
@@ -376,6 +422,7 @@ class ManualMotorSession:
                     last_log_t = now
 
                 time.sleep(control_dt_s)
+                self._check_runtime_stop()
                 sample_t = time.monotonic()
                 dt = max(0.0, sample_t - last_sample_t)
                 last_sample_t = sample_t
@@ -814,6 +861,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                 else:
                     print(f"Unknown command: {command}", flush=True)
                     print_help(axis.axis_name)
+            except MotionInterrupted as exc:
+                print(str(exc), flush=True)
+                session.print_status()
             except (IndexError, ValueError):
                 print("Invalid command arguments. Try `help`.", flush=True)
     except KeyboardInterrupt:
