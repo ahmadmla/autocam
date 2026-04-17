@@ -34,6 +34,8 @@ class ManualAxisState:
     units_per_raw_speed_s: float
     estimated_position: float
     unit_name: str
+    configured_left_limit: Optional[float] = None
+    configured_right_limit: Optional[float] = None
     center_mark: Optional[float] = None
     left_mark: Optional[float] = None
     right_mark: Optional[float] = None
@@ -227,7 +229,10 @@ class ManualMotorSession:
             target = self.axis.left_mark
             label = "left mark"
         if target is None:
-            raise RuntimeError("No left target available. Mark left first.")
+            target = self.axis.configured_left_limit
+            label = "configured left limit"
+        if target is None:
+            raise RuntimeError("No left target available. Mark left first or configure a left limit.")
         self.go_to_position(target, label=label)
 
     def go_to_right(self) -> None:
@@ -237,7 +242,10 @@ class ManualMotorSession:
             target = self.axis.right_mark
             label = "right mark"
         if target is None:
-            raise RuntimeError("No right target available. Mark right first.")
+            target = self.axis.configured_right_limit
+            label = "configured right limit"
+        if target is None:
+            raise RuntimeError("No right target available. Mark right first or configure a right limit.")
         self.go_to_position(target, label=label)
 
     def flip_sign(self) -> None:
@@ -338,6 +346,8 @@ def build_axis_state(axis_name: str) -> ManualAxisState:
             units_per_raw_speed_s=config.motor.truck_m_per_raw_speed_s,
             estimated_position=config.camera_pose.start_x_m,
             unit_name="x_m",
+            configured_left_limit=config.motor.truck_min_x_m,
+            configured_right_limit=config.motor.truck_max_x_m,
         )
     if axis_name == "pan":
         return ManualAxisState(
@@ -347,6 +357,8 @@ def build_axis_state(axis_name: str) -> ManualAxisState:
             units_per_raw_speed_s=config.motor.pan_deg_per_raw_speed_s,
             estimated_position=config.camera_pose.start_pan_deg,
             unit_name="deg",
+            configured_left_limit=config.motor.pan_min_deg,
+            configured_right_limit=config.motor.pan_max_deg,
         )
     raise ValueError(f"Unsupported axis: {axis_name}")
 
