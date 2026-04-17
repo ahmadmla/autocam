@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import sys
 import time
 from dataclasses import dataclass
@@ -18,10 +19,10 @@ if __package__ in (None, ""):
         if candidate not in sys.path:
             sys.path.insert(0, candidate)
     from config import env_bool, env_float, env_int, load_runtime_config
-    from control import Bld305sMotorBus, MotorStatus
+    from control import Bld305sMotorBus, MotorStatus, RUN_FORWARD, RUN_REVERSE
 else:
     from .config import env_bool, env_float, env_int, load_runtime_config
-    from .control import Bld305sMotorBus, MotorStatus
+    from .control import Bld305sMotorBus, MotorStatus, RUN_FORWARD, RUN_REVERSE
 
 LOG = logging.getLogger("motor_manual")
 
@@ -57,6 +58,31 @@ class ManualAxisState:
         if self.left_mark is None or self.right_mark is None:
             return None
         return (self.left_mark + self.right_mark) / 2.0
+
+    def active_min_limit(self, margin: float) -> Optional[float]:
+        conservative = self.conservative_left(margin)
+        if conservative is not None:
+            return conservative
+        return self.configured_left_limit
+
+    def active_max_limit(self, margin: float) -> Optional[float]:
+        conservative = self.conservative_right(margin)
+        if conservative is not None:
+            return conservative
+        return self.configured_right_limit
+
+    def remaining_travel(self, logical_direction: int, margin: float) -> Optional[float]:
+        if logical_direction < 0:
+            min_limit = self.active_min_limit(margin)
+            if min_limit is None:
+                return None
+            return self.estimated_position - min_limit
+        if logical_direction > 0:
+            max_limit = self.active_max_limit(margin)
+            if max_limit is None:
+                return None
+            return max_limit - self.estimated_position
+        return 0.0
 
 
 @dataclass(frozen=True)
@@ -112,11 +138,37 @@ class ManualMotorSession:
         if status.has_fault:
             raise RuntimeError(f"Driver fault on motor {status.motor_id}: code={status.fault_code}")
 
-    def _estimate_delta_from_actual_speed(self, logical_direction: int, duration_s: float) -> float:
-        logical_sign = 1.0 if logical_direction >= 0 else -1.0
+    def _logical_direction_from_status(
+        self,
+        status: MotorStatus,
+        requested_logical_direction: int,
+    ) -> int:
+        if status.run_status == RUN_FORWARD:
+            driver_direction = 1
+        elif status.run_status == RUN_REVERSE:
+            driver_direction = -1
+        else:
+            return 1 if requested_logical_direction >= 0 else -1
+        logical_direction = driver_direction * self.axis.driver_sign
+        return 1 if logical_direction >= 0 else -1
+
+    def _estimate_delta_from_actual_speed(
+        self,
+        requested_logical_direction: int,
+        duration_s: float,
+    ) -> float:
+        logical_sign = 1.0 if requested_logical_direction >= 0 else -1.0
         if not self.live:
-            logical_raw = int(logical_direction) * self.settings.jog_raw_speed
-            return logical_raw * self.axis.units_per_raw_speed_s * duration_s
+            logical_raw = int(requested_logical_direction) * self.settings.jog_raw_speed
+            delta = logical_raw * self.axis.units_per_raw_speed_s * duration_s
+            remaining_travel = self.axis.remaining_travel(
+                int(logical_sign),
+                self.settings.limit_margin,
+            )
+            if remaining_travel is not None:
+                delta = logical_sign * min(abs(delta), max(0.0, remaining_travel))
+            self.axis.estimated_position += delta
+            return delta
 
         end_t = time.monotonic() + max(0.0, duration_s)
         last_t = time.monotonic()
@@ -132,14 +184,45 @@ class ManualMotorSession:
             sample_t = time.monotonic()
             dt = max(0.0, sample_t - last_t)
             last_t = sample_t
+            actual_logical_direction = self._logical_direction_from_status(
+                status,
+                requested_logical_direction,
+            )
             actual_raw = abs(int(status.actual_speed_raw or 0))
-            sample_delta = logical_sign * actual_raw * self.axis.units_per_raw_speed_s * dt
+            sample_delta = (
+                actual_logical_direction
+                * actual_raw
+                * self.axis.units_per_raw_speed_s
+                * dt
+            )
+            remaining_travel = self.axis.remaining_travel(
+                actual_logical_direction,
+                self.settings.limit_margin,
+            )
+            hit_active_bound = False
+            if remaining_travel is not None:
+                remaining_travel = max(0.0, remaining_travel)
+                sample_delta = actual_logical_direction * min(
+                    abs(sample_delta),
+                    remaining_travel,
+                )
+                hit_active_bound = math.isclose(
+                    abs(sample_delta),
+                    remaining_travel,
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                )
+            self.axis.estimated_position += sample_delta
             delta += sample_delta
             sample_index += 1
+            if hit_active_bound:
+                self.stop()
+                return delta
             if self.settings.print_poll_samples:
                 print(
                     f"poll[{sample_index}] t={sample_t:.3f} dt={dt:.4f}s actual_speed_raw={actual_raw} "
-                    f"sample_delta_{self.axis.unit_name}={sample_delta:.5f} cumulative_{self.axis.unit_name}={delta:.5f}",
+                    f"sample_delta_{self.axis.unit_name}={sample_delta:.5f} "
+                    f"estimated_{self.axis.unit_name}={self.axis.estimated_position:.5f}",
                     flush=True,
                 )
         return delta
@@ -164,6 +247,24 @@ class ManualMotorSession:
         logical_raw = int(logical_direction) * pulse_raw_speed
         driver_raw = logical_raw * self.axis.driver_sign
         for index in range(count):
+            remaining_travel = self.axis.remaining_travel(
+                int(logical_direction),
+                self.settings.limit_margin,
+            )
+            if remaining_travel is not None and remaining_travel <= 0.0:
+                raise RuntimeError(
+                    f"Requested move would exceed active {self.axis.axis_name} bounds. "
+                    f"estimated_{self.axis.unit_name}={self.axis.estimated_position:.4f}"
+                )
+            step_duration_s = pulse_duration_s
+            step_rate = pulse_raw_speed * self.axis.units_per_raw_speed_s
+            if remaining_travel is not None and step_rate > 1e-9:
+                step_duration_s = min(step_duration_s, remaining_travel / step_rate)
+                if step_duration_s <= 1e-4:
+                    raise RuntimeError(
+                        f"Requested move is within the active {self.axis.axis_name} bound margin. "
+                        f"estimated_{self.axis.unit_name}={self.axis.estimated_position:.4f}"
+            )
             self.check_fault()
             self.motor_bus.set_speed(self.axis.motor_id, driver_raw)
             self.motor_bus.run(self.axis.motor_id, direction=1 if driver_raw > 0 else -1)
@@ -174,11 +275,13 @@ class ManualMotorSession:
                 count,
                 logical_raw,
                 driver_raw,
-                pulse_duration_s,
+                step_duration_s,
             )
-            delta = self._estimate_delta_from_actual_speed(int(logical_direction), pulse_duration_s)
+            delta = self._estimate_delta_from_actual_speed(
+                int(logical_direction),
+                step_duration_s,
+            )
             self.stop()
-            self.axis.estimated_position += delta
             LOG.info(
                 "manual_motion_estimate axis=%s step=%s/%s delta_%s=%.4f estimated_%s=%.4f",
                 self.axis.axis_name,
@@ -193,6 +296,18 @@ class ManualMotorSession:
             self.check_fault()
 
     def go_to_position(self, target_position: float, *, label: str) -> None:
+        min_limit = self.axis.active_min_limit(self.settings.limit_margin)
+        max_limit = self.axis.active_max_limit(self.settings.limit_margin)
+        if min_limit is not None and target_position < min_limit:
+            raise RuntimeError(
+                f"Requested target is below the active {self.axis.axis_name} minimum. "
+                f"target_{self.axis.unit_name}={target_position:.4f} min_{self.axis.unit_name}={min_limit:.4f}"
+            )
+        if max_limit is not None and target_position > max_limit:
+            raise RuntimeError(
+                f"Requested target is above the active {self.axis.axis_name} maximum. "
+                f"target_{self.axis.unit_name}={target_position:.4f} max_{self.axis.unit_name}={max_limit:.4f}"
+            )
         tolerance = max(0.0, self.settings.goto_tolerance)
         max_steps = max(1, self.settings.goto_max_steps)
         goto_max_duration_s = min(self.settings.max_duration_s, max(0.02, self.settings.goto_max_duration_s))
@@ -293,6 +408,12 @@ class ManualMotorSession:
                 f"conservative_right={self.axis.conservative_right(self.settings.limit_margin):.4f}",
                 flush=True,
             )
+        active_min = self.axis.active_min_limit(self.settings.limit_margin)
+        active_max = self.axis.active_max_limit(self.settings.limit_margin)
+        if active_min is not None:
+            print(f"active_min_{self.axis.unit_name}={active_min:.4f}", flush=True)
+        if active_max is not None:
+            print(f"active_max_{self.axis.unit_name}={active_max:.4f}", flush=True)
         if self.axis.center_mark is not None:
             print(f"center_mark_{self.axis.unit_name}={self.axis.center_mark:.4f}", flush=True)
         bounds_midpoint = self.axis.bounds_midpoint()
