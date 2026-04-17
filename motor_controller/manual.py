@@ -309,39 +309,140 @@ class ManualMotorSession:
                 f"target_{self.axis.unit_name}={target_position:.4f} max_{self.axis.unit_name}={max_limit:.4f}"
             )
         tolerance = max(0.0, self.settings.goto_tolerance)
-        max_steps = max(1, self.settings.goto_max_steps)
         goto_max_duration_s = min(self.settings.max_duration_s, max(0.02, self.settings.goto_max_duration_s))
         max_raw_speed = min(self.settings.max_raw_speed, max(1, self.settings.jog_raw_speed))
-        for step in range(1, max_steps + 1):
-            error = target_position - self.axis.estimated_position
-            if abs(error) <= tolerance:
-                print(
-                    f"Reached {label}: target_{self.axis.unit_name}={target_position:.4f} "
-                    f"estimated_{self.axis.unit_name}={self.axis.estimated_position:.4f} "
-                    f"error_{self.axis.unit_name}={error:.4f}",
-                    flush=True,
-                )
-                return
-            direction = 1 if error > 0.0 else -1
-            raw_speed_from_error = int(round(abs(error) / max(self.axis.units_per_raw_speed_s * goto_max_duration_s, 1e-9)))
-            pulse_raw_speed = min(max_raw_speed, max(1, raw_speed_from_error))
-            nominal_rate = max(1e-9, pulse_raw_speed * self.axis.units_per_raw_speed_s)
-            pulse_duration_s = min(
-                goto_max_duration_s,
-                max(0.02, abs(error) / nominal_rate),
-            )
-            print(
-                f"go[{step}/{max_steps}] label={label} target_{self.axis.unit_name}={target_position:.4f} "
-                f"estimated_{self.axis.unit_name}={self.axis.estimated_position:.4f} "
-                f"error_{self.axis.unit_name}={error:.4f} raw_speed={pulse_raw_speed} duration_s={pulse_duration_s:.3f}",
-                flush=True,
-            )
-            self.pulse(direction, count=1, duration_s=pulse_duration_s, raw_speed=pulse_raw_speed)
-        raise RuntimeError(
-            f"Could not reach {label} within {max_steps} steps. "
-            f"estimated_{self.axis.unit_name}={self.axis.estimated_position:.4f} "
-            f"target_{self.axis.unit_name}={target_position:.4f}"
-        )
+        control_dt_s = max(0.01, self.settings.status_poll_s)
+        max_runtime_s = max(0.25, self.settings.goto_max_steps * goto_max_duration_s)
+        deadline = time.monotonic() + max_runtime_s
+        last_sample_t = time.monotonic()
+        last_log_t = 0.0
+        current_driver_direction = 0
+        current_raw_speed = 0
+
+        try:
+            while True:
+                error = target_position - self.axis.estimated_position
+                if abs(error) <= tolerance:
+                    self.stop()
+                    print(
+                        f"Reached {label}: target_{self.axis.unit_name}={target_position:.4f} "
+                        f"estimated_{self.axis.unit_name}={self.axis.estimated_position:.4f} "
+                        f"error_{self.axis.unit_name}={error:.4f}",
+                        flush=True,
+                    )
+                    return
+
+                now = time.monotonic()
+                if now >= deadline:
+                    raise RuntimeError(
+                        f"Could not reach {label} within {max_runtime_s:.2f}s. "
+                        f"estimated_{self.axis.unit_name}={self.axis.estimated_position:.4f} "
+                        f"target_{self.axis.unit_name}={target_position:.4f}"
+                    )
+
+                direction = 1 if error > 0.0 else -1
+                remaining_travel = self.axis.remaining_travel(direction, self.settings.limit_margin)
+                if remaining_travel is not None and remaining_travel <= 0.0:
+                    raise RuntimeError(
+                        f"Requested move would exceed active {self.axis.axis_name} bounds. "
+                        f"estimated_{self.axis.unit_name}={self.axis.estimated_position:.4f}"
+                    )
+
+                raw_speed_from_error = int(round(
+                    abs(error) / max(self.axis.units_per_raw_speed_s * goto_max_duration_s, 1e-9)
+                ))
+                command_raw_speed = min(max_raw_speed, max(1, raw_speed_from_error))
+                driver_direction = direction * self.axis.driver_sign
+                if (
+                    command_raw_speed != current_raw_speed
+                    or driver_direction != current_driver_direction
+                ):
+                    self.check_fault()
+                    self.motor_bus.set_speed(self.axis.motor_id, command_raw_speed)
+                    self.motor_bus.run(
+                        self.axis.motor_id,
+                        direction=1 if driver_direction > 0 else -1,
+                    )
+                    current_raw_speed = command_raw_speed
+                    current_driver_direction = driver_direction
+
+                if (now - last_log_t) >= 0.25:
+                    print(
+                        f"go label={label} target_{self.axis.unit_name}={target_position:.4f} "
+                        f"estimated_{self.axis.unit_name}={self.axis.estimated_position:.4f} "
+                        f"error_{self.axis.unit_name}={error:.4f} raw_speed={command_raw_speed}",
+                        flush=True,
+                    )
+                    last_log_t = now
+
+                time.sleep(control_dt_s)
+                sample_t = time.monotonic()
+                dt = max(0.0, sample_t - last_sample_t)
+                last_sample_t = sample_t
+
+                if self.live:
+                    status = self.read_status()
+                    self.check_fault()
+                    actual_logical_direction = self._logical_direction_from_status(
+                        status,
+                        direction,
+                    )
+                    actual_raw = abs(int(status.actual_speed_raw or 0))
+                    sample_delta = (
+                        actual_logical_direction
+                        * actual_raw
+                        * self.axis.units_per_raw_speed_s
+                        * dt
+                    )
+                    sample_remaining = self.axis.remaining_travel(
+                        actual_logical_direction,
+                        self.settings.limit_margin,
+                    )
+                    if sample_remaining is not None:
+                        sample_remaining = max(0.0, sample_remaining)
+                        sample_delta = actual_logical_direction * min(
+                            abs(sample_delta),
+                            sample_remaining,
+                        )
+                    self.axis.estimated_position += sample_delta
+                    if (
+                        sample_remaining is not None
+                        and math.isclose(
+                            abs(sample_delta),
+                            sample_remaining,
+                            rel_tol=0.0,
+                            abs_tol=1e-9,
+                        )
+                    ):
+                        raise RuntimeError(
+                            f"Stopped at active {self.axis.axis_name} bound. "
+                            f"estimated_{self.axis.unit_name}={self.axis.estimated_position:.4f}"
+                        )
+                else:
+                    sample_delta = direction * command_raw_speed * self.axis.units_per_raw_speed_s * dt
+                    sample_remaining = self.axis.remaining_travel(
+                        direction,
+                        self.settings.limit_margin,
+                    )
+                    if sample_remaining is not None:
+                        sample_remaining = max(0.0, sample_remaining)
+                        sample_delta = direction * min(abs(sample_delta), sample_remaining)
+                    self.axis.estimated_position += sample_delta
+                    if (
+                        sample_remaining is not None
+                        and math.isclose(
+                            abs(sample_delta),
+                            sample_remaining,
+                            rel_tol=0.0,
+                            abs_tol=1e-9,
+                        )
+                    ):
+                        raise RuntimeError(
+                            f"Stopped at active {self.axis.axis_name} bound. "
+                            f"estimated_{self.axis.unit_name}={self.axis.estimated_position:.4f}"
+                        )
+        finally:
+            self.stop()
 
     def go_to_center(self) -> None:
         target = self.axis.center_mark

@@ -22,8 +22,10 @@ REG_SPEED_SET = 0x0056
 REG_RUN_CMD = 0x0066
 REG_FAULT_CLEAR = 0x0076
 REG_DRIVE_ADDR = 0x00A6
+REG_ACCEL_DECEL = 0x00E6
 REG_CONTROL_MODE = 0x0136
 REG_SAVE = 0x80FF
+SAVE_MAGIC = 0x55AA
 
 REG_ACTUAL_SPEED = 0x005F
 REG_RUN_STATUS = 0x0066
@@ -158,6 +160,15 @@ class Bld305sMotorBus:
 
     def clear_fault(self, motor_id: int) -> None:
         self.write_reg(motor_id, REG_FAULT_CLEAR, 0)
+
+    def read_accel_decel_raw(self, motor_id: int) -> int:
+        return int(self.read_reg(motor_id, REG_ACCEL_DECEL)[0]) & 0xFFFF
+
+    def write_accel_decel_raw(self, motor_id: int, value: int) -> None:
+        self.write_reg(motor_id, REG_ACCEL_DECEL, int(value) & 0xFFFF)
+
+    def save_parameters(self, motor_id: int) -> None:
+        self.write_reg(motor_id, REG_SAVE, SAVE_MAGIC)
 
     def set_speed(self, motor_id: int, raw_speed: int) -> None:
         # The BLD-305S expects a non-negative speed magnitude; direction is a separate run command.
