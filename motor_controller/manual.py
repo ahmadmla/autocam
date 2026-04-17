@@ -17,10 +17,10 @@ if __package__ in (None, ""):
     for candidate in (str(REPO_ROOT), str(PACKAGE_ROOT)):
         if candidate not in sys.path:
             sys.path.insert(0, candidate)
-    from config import env_float, env_int, load_runtime_config
+    from config import env_bool, env_float, env_int, load_runtime_config
     from control import Bld305sMotorBus, MotorStatus
 else:
-    from .config import env_float, env_int, load_runtime_config
+    from .config import env_bool, env_float, env_int, load_runtime_config
     from .control import Bld305sMotorBus, MotorStatus
 
 LOG = logging.getLogger("motor_manual")
@@ -65,6 +65,7 @@ class ManualSettings:
     max_duration_s: float
     settle_s: float
     status_poll_s: float
+    print_poll_samples: bool
     limit_margin: float
 
 
@@ -115,6 +116,7 @@ class ManualMotorSession:
         end_t = time.monotonic() + max(0.0, duration_s)
         last_t = time.monotonic()
         delta = 0.0
+        sample_index = 0
         while True:
             now = time.monotonic()
             remaining = end_t - now
@@ -126,7 +128,15 @@ class ManualMotorSession:
             dt = max(0.0, sample_t - last_t)
             last_t = sample_t
             actual_raw = abs(int(status.actual_speed_raw or 0))
-            delta += logical_sign * actual_raw * self.axis.units_per_raw_speed_s * dt
+            sample_delta = logical_sign * actual_raw * self.axis.units_per_raw_speed_s * dt
+            delta += sample_delta
+            sample_index += 1
+            if self.settings.print_poll_samples:
+                print(
+                    f"poll[{sample_index}] t={sample_t:.3f} dt={dt:.4f}s actual_speed_raw={actual_raw} "
+                    f"sample_delta_{self.axis.unit_name}={sample_delta:.5f} cumulative_{self.axis.unit_name}={delta:.5f}",
+                    flush=True,
+                )
         return delta
 
     def pulse(self, logical_direction: int, *, count: int = 1) -> None:
@@ -176,7 +186,7 @@ class ManualMotorSession:
         print(
             f"jog_raw_speed={self.settings.jog_raw_speed} jog_duration_s={self.settings.jog_duration_s:.3f} "
             f"settle_s={self.settings.settle_s:.3f} status_poll_s={self.settings.status_poll_s:.3f} "
-            f"actual_speed_raw={status.actual_speed_raw} fault={status.fault_code}",
+            f"print_poll_samples={int(self.settings.print_poll_samples)} actual_speed_raw={status.actual_speed_raw} fault={status.fault_code}",
             flush=True,
         )
         if self.axis.left_mark is not None:
@@ -287,6 +297,7 @@ def load_manual_settings(default_speed: int) -> ManualSettings:
         max_duration_s=max_duration_s,
         settle_s=max(0.0, env_float("MOTOR_MANUAL_SETTLE_S", 0.20)),
         status_poll_s=max(0.01, env_float("MOTOR_MANUAL_STATUS_POLL_S", 0.02)),
+        print_poll_samples=env_bool("MOTOR_MANUAL_PRINT_POLL_SAMPLES", False),
         limit_margin=max(0.0, env_float("MOTOR_MANUAL_LIMIT_MARGIN_M", 0.05)),
     )
 
@@ -393,6 +404,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                         max_duration_s=session.settings.max_duration_s,
                         settle_s=session.settings.settle_s,
                         status_poll_s=session.settings.status_poll_s,
+                        print_poll_samples=session.settings.print_poll_samples,
                         limit_margin=session.settings.limit_margin,
                     )
                     session.print_status()
@@ -405,6 +417,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                         max_duration_s=session.settings.max_duration_s,
                         settle_s=session.settings.settle_s,
                         status_poll_s=session.settings.status_poll_s,
+                        print_poll_samples=session.settings.print_poll_samples,
                         limit_margin=session.settings.limit_margin,
                     )
                     session.print_status()
