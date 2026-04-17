@@ -10,9 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+PACKAGE_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = PACKAGE_ROOT.parent
+
 if __package__ in (None, ""):
-    PACKAGE_ROOT = Path(__file__).resolve().parent
-    REPO_ROOT = PACKAGE_ROOT.parent
     for candidate in (str(REPO_ROOT), str(PACKAGE_ROOT)):
         if candidate not in sys.path:
             sys.path.insert(0, candidate)
@@ -33,6 +34,7 @@ class ManualAxisState:
     units_per_raw_speed_s: float
     estimated_position: float
     unit_name: str
+    center_mark: Optional[float] = None
     left_mark: Optional[float] = None
     right_mark: Optional[float] = None
 
@@ -42,12 +44,17 @@ class ManualAxisState:
     def conservative_left(self, margin: float) -> Optional[float]:
         if self.left_mark is None:
             return None
-        return self.left_mark + abs(margin)
+        return self.left_mark + abs(margin) if self.left_mark <= 0.0 else self.left_mark - abs(margin)
 
     def conservative_right(self, margin: float) -> Optional[float]:
         if self.right_mark is None:
             return None
-        return self.right_mark - abs(margin)
+        return self.right_mark - abs(margin) if self.right_mark >= 0.0 else self.right_mark + abs(margin)
+
+    def bounds_midpoint(self) -> Optional[float]:
+        if self.left_mark is None or self.right_mark is None:
+            return None
+        return (self.left_mark + self.right_mark) / 2.0
 
 
 @dataclass(frozen=True)
@@ -149,25 +156,63 @@ class ManualMotorSession:
                 f"conservative_right={self.axis.conservative_right(self.settings.limit_margin):.4f}",
                 flush=True,
             )
+        if self.axis.center_mark is not None:
+            print(f"center_mark_{self.axis.unit_name}={self.axis.center_mark:.4f}", flush=True)
+        bounds_midpoint = self.axis.bounds_midpoint()
+        if bounds_midpoint is not None:
+            print(f"bounds_midpoint_{self.axis.unit_name}={bounds_midpoint:.4f}", flush=True)
         self.print_env_suggestions()
 
-    def print_env_suggestions(self) -> None:
+    def build_base_env_updates(self) -> dict[str, str]:
+        startup_center = self.axis.center_mark
+        if startup_center is None:
+            startup_center = self.axis.estimated_position
         if self.axis.axis_name == "truck":
-            print("Suggested env values:", flush=True)
-            print(f"  TRUCK_SIGN={self.axis.driver_sign}", flush=True)
-            print(f"  CAMERA_START_X_M={self.axis.estimated_position:.4f}    # if you zeroed at your desired startup center", flush=True)
-            if self.axis.left_mark is not None:
-                print(f"  TRUCK_MIN_X_M={self.axis.conservative_left(self.settings.limit_margin):.4f}", flush=True)
-            if self.axis.right_mark is not None:
-                print(f"  TRUCK_MAX_X_M={self.axis.conservative_right(self.settings.limit_margin):.4f}", flush=True)
-        else:
-            print("Suggested env values:", flush=True)
-            print(f"  PAN_SIGN={self.axis.driver_sign}", flush=True)
-            print(f"  CAMERA_START_PAN_DEG={self.axis.estimated_position:.4f}    # if you zeroed at your desired startup center", flush=True)
-            if self.axis.left_mark is not None:
-                print(f"  PAN_MIN_DEG={self.axis.conservative_left(self.settings.limit_margin):.4f}", flush=True)
-            if self.axis.right_mark is not None:
-                print(f"  PAN_MAX_DEG={self.axis.conservative_right(self.settings.limit_margin):.4f}", flush=True)
+            return {
+                "TRUCK_SIGN": str(self.axis.driver_sign),
+                "CAMERA_START_X_M": f"{startup_center:.4f}",
+            }
+        return {
+            "PAN_SIGN": str(self.axis.driver_sign),
+            "CAMERA_START_PAN_DEG": f"{startup_center:.4f}",
+        }
+
+    def build_env_updates(self) -> dict[str, str]:
+        updates = self.build_base_env_updates()
+        if self.axis.axis_name == "truck":
+            left_value = self.axis.conservative_left(self.settings.limit_margin)
+            right_value = self.axis.conservative_right(self.settings.limit_margin)
+            if left_value is not None:
+                updates["TRUCK_MIN_X_M"] = f"{left_value:.4f}"
+            if right_value is not None:
+                updates["TRUCK_MAX_X_M"] = f"{right_value:.4f}"
+            if left_value is not None and right_value is not None and left_value >= right_value:
+                raise ValueError("Left/right truck limits overlap or are inverted. Re-zero and re-mark before saving.")
+            return updates
+
+        updates = self.build_base_env_updates()
+        left_value = self.axis.conservative_left(self.settings.limit_margin)
+        right_value = self.axis.conservative_right(self.settings.limit_margin)
+        if left_value is not None:
+            updates["PAN_MIN_DEG"] = f"{left_value:.4f}"
+        if right_value is not None:
+            updates["PAN_MAX_DEG"] = f"{right_value:.4f}"
+        if left_value is not None and right_value is not None and left_value >= right_value:
+            raise ValueError("Left/right pan limits overlap or are inverted. Re-zero and re-mark before saving.")
+        return updates
+
+    def print_env_suggestions(self) -> None:
+        print("Suggested env values:", flush=True)
+        try:
+            updates = self.build_env_updates()
+        except ValueError as exc:
+            updates = self.build_base_env_updates()
+            for key, value in updates.items():
+                print(f"  {key}={value}", flush=True)
+            print(f"  WARNING: {exc}", flush=True)
+            return
+        for key, value in updates.items():
+            print(f"  {key}={value}", flush=True)
 
 
 def build_axis_state(axis_name: str) -> ManualAxisState:
@@ -216,6 +261,20 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def upsert_env_values(env_path: Path, updates: dict[str, str]) -> None:
+    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+    for key, value in updates.items():
+        replacement = f"{key}={value}"
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith(f"{key}=") or stripped.startswith(f"export {key}="):
+                lines[index] = replacement
+                break
+        else:
+            lines.append(replacement)
+    env_path.write_text("\n".join(lines).rstrip("\n") + "\n", encoding="utf-8")
+
+
 def print_help(axis_name: str) -> None:
     print(f"Manual {axis_name} commands:", flush=True)
     print("  p                jog in the positive logical direction once", flush=True)
@@ -225,12 +284,14 @@ def print_help(axis_name: str) -> None:
     print("  speed <raw>      set jog raw speed (clamped to MOTOR_MANUAL_MAX_RAW_SPEED)", flush=True)
     print("  duration <sec>   set jog duration (clamped to MOTOR_MANUAL_MAX_DURATION_S)", flush=True)
     print("  flip-sign        invert runtime motor sign without editing .env", flush=True)
-    print("  zero             define the current position as 0 for this session", flush=True)
+    print("  zero             define the current position as 0 and record it as the startup center", flush=True)
+    print("  mark-center      record the current position as the startup center without renormalizing", flush=True)
     print("  mark-left        record the current position as the physical left/min limit", flush=True)
     print("  mark-right       record the current position as the physical right/max limit", flush=True)
     print("  set-pos <value>  manually set the estimated position for this session", flush=True)
     print("  status           print current status and suggested env values", flush=True)
     print("  stop             send an immediate stop", flush=True)
+    print("  save-env         confirm and write the current suggested values into ../.env", flush=True)
     print("  help             print this help", flush=True)
     print("  quit             stop and exit", flush=True)
 
@@ -314,6 +375,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                     session.print_status()
                 elif command == "zero":
                     session.axis.estimated_position = 0.0
+                    session.axis.center_mark = 0.0
+                    session.print_status()
+                elif command == "mark-center":
+                    session.axis.center_mark = session.axis.estimated_position
                     session.print_status()
                 elif command == "mark-left":
                     session.axis.left_mark = session.axis.estimated_position
@@ -329,6 +394,22 @@ def main(argv: Optional[list[str]] = None) -> int:
                 elif command == "stop":
                     session.stop()
                     session.print_status()
+                elif command == "save-env":
+                    try:
+                        updates = session.build_env_updates()
+                    except ValueError as exc:
+                        print(str(exc), flush=True)
+                        continue
+                    env_path = REPO_ROOT / ".env"
+                    print(f"About to write these values into {env_path}:", flush=True)
+                    for key, value in updates.items():
+                        print(f"  {key}={value}", flush=True)
+                    confirm = input("Type YES to save these values: ").strip()
+                    if confirm == "YES":
+                        upsert_env_values(env_path, updates)
+                        print(f"Saved {len(updates)} values to {env_path}", flush=True)
+                    else:
+                        print("Cancelled .env update.", flush=True)
                 elif command in ("quit", "exit"):
                     break
                 else:
@@ -346,5 +427,6 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 
 
