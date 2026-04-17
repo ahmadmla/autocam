@@ -320,6 +320,34 @@ class ManualMotorSession:
         confirm = input("Type OVERRIDE to continue past the estimated bound: ").strip()
         return confirm == "OVERRIDE"
 
+    def _confirm_goto_limit_override(
+        self,
+        target_position: float,
+        *,
+        min_limit: Optional[float],
+        max_limit: Optional[float],
+        label: str,
+    ) -> bool:
+        print(
+            f"Requested {label} target is outside the active {self.axis.axis_name} bounds: "
+            f"target_{self.axis.unit_name}={target_position:.4f} "
+            f"estimated_{self.axis.unit_name}={self.axis.estimated_position:.4f}",
+            flush=True,
+        )
+        if min_limit is not None:
+            print(f"active_min_{self.axis.unit_name}={min_limit:.4f}", flush=True)
+        if max_limit is not None:
+            print(f"active_max_{self.axis.unit_name}={max_limit:.4f}", flush=True)
+        if not self.settings.confirm_limit_override:
+            return False
+        if not sys.stdin.isatty():
+            raise RuntimeError(
+                "Requested go target is outside the active estimated bounds, but no interactive terminal "
+                "is available to confirm the override."
+            )
+        confirm = input("Type OVERRIDE to continue past the estimated bound: ").strip()
+        return confirm == "OVERRIDE"
+
     def pulse(
         self,
         logical_direction: int,
@@ -398,16 +426,19 @@ class ManualMotorSession:
     def go_to_position(self, target_position: float, *, label: str) -> None:
         min_limit = self.axis.active_min_limit(self.settings.limit_margin)
         max_limit = self.axis.active_max_limit(self.settings.limit_margin)
-        if min_limit is not None and target_position < min_limit:
-            raise RuntimeError(
-                f"Requested target is below the active {self.axis.axis_name} minimum. "
-                f"target_{self.axis.unit_name}={target_position:.4f} min_{self.axis.unit_name}={min_limit:.4f}"
-            )
-        if max_limit is not None and target_position > max_limit:
-            raise RuntimeError(
-                f"Requested target is above the active {self.axis.axis_name} maximum. "
-                f"target_{self.axis.unit_name}={target_position:.4f} max_{self.axis.unit_name}={max_limit:.4f}"
-            )
+        enforce_limits = True
+        target_below_min = min_limit is not None and target_position < min_limit
+        target_above_max = max_limit is not None and target_position > max_limit
+        if target_below_min or target_above_max:
+            if not self._confirm_goto_limit_override(
+                target_position,
+                min_limit=min_limit,
+                max_limit=max_limit,
+                label=label,
+            ):
+                print("Go command cancelled.", flush=True)
+                return
+            enforce_limits = False
         tolerance = max(0.0, self.settings.goto_tolerance)
         goto_max_duration_s = min(self.settings.max_duration_s, max(0.02, self.settings.goto_max_duration_s))
         goto_max_raw_speed = min(
@@ -445,7 +476,9 @@ class ManualMotorSession:
                     )
 
                 direction = 1 if error > 0.0 else -1
-                remaining_travel = self.axis.remaining_travel(direction, self.settings.limit_margin)
+                remaining_travel = None
+                if enforce_limits:
+                    remaining_travel = self.axis.remaining_travel(direction, self.settings.limit_margin)
                 if remaining_travel is not None and remaining_travel <= 0.0:
                     raise RuntimeError(
                         f"Requested move would exceed active {self.axis.axis_name} bounds. "
@@ -504,10 +537,12 @@ class ManualMotorSession:
                         * self.axis.units_per_raw_speed_s
                         * dt
                     )
-                    sample_remaining = self.axis.remaining_travel(
-                        actual_logical_direction,
-                        self.settings.limit_margin,
-                    )
+                    sample_remaining = None
+                    if enforce_limits:
+                        sample_remaining = self.axis.remaining_travel(
+                            actual_logical_direction,
+                            self.settings.limit_margin,
+                        )
                     if sample_remaining is not None:
                         sample_remaining = max(0.0, sample_remaining)
                         sample_delta = actual_logical_direction * min(
@@ -530,10 +565,12 @@ class ManualMotorSession:
                         )
                 else:
                     sample_delta = direction * command_raw_speed * self.axis.units_per_raw_speed_s * dt
-                    sample_remaining = self.axis.remaining_travel(
-                        direction,
-                        self.settings.limit_margin,
-                    )
+                    sample_remaining = None
+                    if enforce_limits:
+                        sample_remaining = self.axis.remaining_travel(
+                            direction,
+                            self.settings.limit_margin,
+                        )
                     if sample_remaining is not None:
                         sample_remaining = max(0.0, sample_remaining)
                         sample_delta = direction * min(abs(sample_delta), sample_remaining)
@@ -937,6 +974,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                     print(f"Unknown command: {command}", flush=True)
                     print_help(axis.axis_name)
             except MotionInterrupted as exc:
+                print(str(exc), flush=True)
+                session.print_status()
+            except RuntimeError as exc:
                 print(str(exc), flush=True)
                 session.print_status()
             except (IndexError, ValueError):
