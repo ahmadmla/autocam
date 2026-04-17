@@ -220,6 +220,26 @@ class ManualMotorSession:
             raise RuntimeError("No center target available. Mark left/right bounds or set a center mark first.")
         self.go_to_position(target, label=label)
 
+    def go_to_left(self) -> None:
+        target = self.axis.conservative_left(self.settings.limit_margin)
+        label = "safe left bound"
+        if target is None:
+            target = self.axis.left_mark
+            label = "left mark"
+        if target is None:
+            raise RuntimeError("No left target available. Mark left first.")
+        self.go_to_position(target, label=label)
+
+    def go_to_right(self) -> None:
+        target = self.axis.conservative_right(self.settings.limit_margin)
+        label = "safe right bound"
+        if target is None:
+            target = self.axis.right_mark
+            label = "right mark"
+        if target is None:
+            raise RuntimeError("No right target available. Mark right first.")
+        self.go_to_position(target, label=label)
+
     def flip_sign(self) -> None:
         self.axis.driver_sign *= -1
         LOG.warning("manual_sign_flipped axis=%s new_sign=%s", self.axis.axis_name, self.axis.driver_sign)
@@ -346,6 +366,8 @@ def load_manual_settings(default_speed: int) -> ManualSettings:
         settle_s=max(0.0, env_float("MOTOR_MANUAL_SETTLE_S", 0.20)),
         status_poll_s=max(0.01, env_float("MOTOR_MANUAL_STATUS_POLL_S", 0.02)),
         print_poll_samples=env_bool("MOTOR_MANUAL_PRINT_POLL_SAMPLES", False),
+        goto_tolerance=max(0.0, env_float("MOTOR_MANUAL_GOTO_TOLERANCE", 0.01)),
+        goto_max_steps=max(1, env_int("MOTOR_MANUAL_GOTO_MAX_STEPS", 50)),
         limit_margin=max(0.0, env_float("MOTOR_MANUAL_LIMIT_MARGIN_M", 0.05)),
     )
 
@@ -384,6 +406,8 @@ def print_help(axis_name: str) -> None:
     print("  mark-left        record the current position as the physical left/min limit", flush=True)
     print("  mark-right       record the current position as the physical right/max limit", flush=True)
     print("  set-pos <value>  manually set the estimated position for this session", flush=True)
+    print("  go-left          move to the saved left bound using the inward safety margin when available", flush=True)
+    print("  go-right         move to the saved right bound using the inward safety margin when available", flush=True)
     print("  go-center        move to the midpoint of left/right marks, or the center mark if bounds are unavailable", flush=True)
     print("  status           print current status and suggested env values", flush=True)
     print("  stop             send an immediate stop", flush=True)
@@ -492,6 +516,12 @@ def main(argv: Optional[list[str]] = None) -> int:
                     session.print_status()
                 elif command == "set-pos":
                     session.axis.estimated_position = float(parts[1])
+                    session.print_status()
+                elif command == "go-left":
+                    session.go_to_left()
+                    session.print_status()
+                elif command == "go-right":
+                    session.go_to_right()
                     session.print_status()
                 elif command == "go-center":
                     session.go_to_center()
