@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import signal
 import sys
 import time
@@ -428,10 +429,21 @@ class MotorControllerApp:
             self.config.motor.pan_max_raw_speed,
         )))
 
-        alpha = clamp(self.config.control.truck_error_filter_alpha, 0.0, 1.0)
-        # Reset the truck error filter when the target crosses sides so the truck can
-        # promptly reverse away from a soft limit instead of dragging old error sign.
-        if self.truck_error_filtered and error_x and (self.truck_error_filtered * error_x < 0.0):
+        tau_s = max(0.0, self.config.control.truck_error_filter_tau_s)
+        if tau_s > 0.0:
+            alpha = 1.0 - math.exp(-max(0.0, dt_s) / tau_s)
+        else:
+            alpha = clamp(self.config.control.truck_error_filter_alpha, 0.0, 1.0)
+        # Snap the filter to the raw error when the target crosses sides or when the
+        # error magnitude has jumped far from the filtered value, so the truck reacts
+        # promptly to targets appearing at new positions instead of creeping up via EWMA.
+        snap_threshold_px = max(
+            self.config.control.truck_image_deadband_px,
+            abs(self.truck_error_filtered) * 0.5,
+        )
+        sign_flipped = bool(self.truck_error_filtered) and bool(error_x) and (self.truck_error_filtered * error_x < 0.0)
+        large_jump = abs(error_x - self.truck_error_filtered) > snap_threshold_px
+        if sign_flipped or large_jump:
             self.truck_error_filtered = error_x
         else:
             self.truck_error_filtered = (1.0 - alpha) * self.truck_error_filtered + alpha * error_x

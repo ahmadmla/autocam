@@ -124,6 +124,7 @@ class ControlRuntimeConfig:
     pan_kp_raw_per_px: float
     truck_kp_raw_per_px: float
     truck_error_filter_alpha: float
+    truck_error_filter_tau_s: float
     pan_preferred_yaw_min_deg: float
     pan_preferred_yaw_max_deg: float
     safe_image_margin_px: float
@@ -274,6 +275,7 @@ def load_runtime_config() -> RuntimeConfig:
         pan_kp_raw_per_px=env_float("PAN_KP_RAW_PER_PX", 0.45),
         truck_kp_raw_per_px=env_float("TRUCK_KP_RAW_PER_PX", 0.08),
         truck_error_filter_alpha=env_float("TRUCK_ERROR_FILTER_ALPHA", 0.05),
+        truck_error_filter_tau_s=env_float("TRUCK_ERROR_FILTER_TAU_S", 0.15),
         pan_preferred_yaw_min_deg=env_float("PAN_PREFERRED_YAW_MIN_DEG", -25.0),
         pan_preferred_yaw_max_deg=env_float("PAN_PREFERRED_YAW_MAX_DEG", 25.0),
         safe_image_margin_px=env_float("MOTOR_SAFE_IMAGE_MARGIN_PX", 120.0),
