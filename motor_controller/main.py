@@ -573,13 +573,14 @@ class MotorControllerApp:
                     self.latest_actual_truck_raw,
                 )
             else:
+                active_truck_min, active_truck_max = self.pose_estimator.active_truck_limits()
                 LOG.info(
-                    "tick armed=%s selected=%s target=none pose_est=rail=%.3f x=%.3f y=%.3f pan=%.2f cmd=0,0",
+                    "tick armed=%s selected=%s target=none rail=%.3f limits=(%.3f,%.3f) pan=%.2f cmd=0,0",
                     int(self.armed),
                     self.selected_node,
                     pose.rail_position_m,
-                    pose.x_m,
-                    pose.y_m,
+                    active_truck_min,
+                    active_truck_max,
                     pose.pan_deg,
                 )
             return
@@ -615,8 +616,9 @@ class MotorControllerApp:
                 self.driver_truck_command,
             )
         else:
+            active_truck_min, active_truck_max = self.pose_estimator.active_truck_limits()
             LOG.info(
-                "tick armed=%s selected=%s q=%.2f filt=(%.3f,%.3f) pose_est=(rail=%.3f,x=%.3f,y=%.3f,pan=%.2f) "
+                "tick armed=%s selected=%s q=%.2f filt=(%.3f,%.3f) rail=%.3f limits=(%.3f,%.3f) pan=%.2f "
                 "px=(%.1f,%.1f) err_x=%.1f mode=%s source=%s cmd_logical=(%s,%s) cmd_driver=(%s,%s)",
                 int(self.armed),
                 target.node_id,
@@ -624,8 +626,8 @@ class MotorControllerApp:
                 target.x_m,
                 target.y_m,
                 pose.rail_position_m,
-                pose.x_m,
-                pose.y_m,
+                active_truck_min,
+                active_truck_max,
                 pose.pan_deg,
                 command.projected.x_px,
                 command.projected.y_px,
