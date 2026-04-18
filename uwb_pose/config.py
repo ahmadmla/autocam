@@ -36,6 +36,14 @@ def env_float(name: str, default: float) -> float:
         return default
 
 
+# Parse a boolean environment variable and fall back when it is missing.
+def env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value in (None, ""):
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 # Parse a `key:value` float mapping from an environment variable.
 def parse_float_mapping(value: str, default: Dict[str, float]) -> Dict[str, float]:
     parsed = {str(key): float(number) for key, number in default.items()}
@@ -159,6 +167,7 @@ EVENT_LOG_PATH = env_str(
     "CENTRAL_EVENT_LOG_PATH",
     "central_pose_logger_output.txt",
 )
+CENTRAL_LOGGER_CONSOLE = env_bool("CENTRAL_LOGGER_CONSOLE", True)
 SERIAL_DIAGNOSTIC_INTERVAL_S = env_float("SERIAL_DIAGNOSTIC_INTERVAL_S", 10.0)
 PIPELINE_DIAGNOSTIC_INTERVAL_S = env_float("PIPELINE_DIAGNOSTIC_INTERVAL_S", 10.0)
 

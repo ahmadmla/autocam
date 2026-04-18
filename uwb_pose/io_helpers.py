@@ -6,6 +6,7 @@ from typing import Dict, Iterator, Optional, Tuple
 
 from . import geometry as geom_state
 from .config import (
+    CENTRAL_LOGGER_CONSOLE,
     EVENT_LOG_PATH,
     HISTORY_FLUSH_INTERVAL_S,
     HISTORY_FLUSH_MAX_PENDING,
@@ -174,7 +175,8 @@ RAW_SERIAL_LOGGER = TextLogWriter(RAW_SERIAL_LOG_PATH)
 
 # Print a runtime event and mirror it into the persistent event log.
 def emit_log(message: str) -> None:
-    print(message, flush=True)
+    if CENTRAL_LOGGER_CONSOLE:
+        print(message, flush=True)
     EVENT_LOGGER.write_line(f"{format_log_timestamp()} {message}")
 
 
