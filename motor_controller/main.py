@@ -7,6 +7,7 @@ import logging
 import math
 import signal
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
@@ -96,6 +97,9 @@ class MotorControllerApp:
         self.latest_actual_pan_raw = 0.0
         self.latest_actual_truck_raw = 0.0
         self.latest_statuses: Dict[int, MotorStatus] = {}
+        self._motor_lock = threading.RLock()
+        self._safety_stop_event = threading.Event()
+        self._safety_thread: Optional[threading.Thread] = None
 
         try:
             self.client = mqtt.Client(
@@ -121,12 +125,13 @@ class MotorControllerApp:
         return tuple(motor_ids)
 
     def stop_motors(self) -> None:
-        self.logical_pan_command = 0
-        self.logical_truck_command = 0
-        self.driver_pan_command = 0
-        self.driver_truck_command = 0
-        self.latest_statuses: Dict[int, MotorStatus] = {}
-        self.motor_bus.stop_all(self.motor_ids)
+        with self._motor_lock:
+            self.logical_pan_command = 0
+            self.logical_truck_command = 0
+            self.driver_pan_command = 0
+            self.driver_truck_command = 0
+            self.latest_statuses = {}
+            self.motor_bus.stop_all(self.motor_ids)
 
     def arm(self) -> None:
         pose = self.pose_estimator.reset_to_start()
@@ -315,25 +320,43 @@ class MotorControllerApp:
         )
 
     def _read_statuses(self) -> Dict[int, MotorStatus]:
-        statuses = {motor_id: self.motor_bus.read_status(motor_id) for motor_id in self.motor_ids}
-        self.latest_statuses = statuses
+        with self._motor_lock:
+            statuses = {motor_id: self.motor_bus.read_status(motor_id) for motor_id in self.motor_ids}
+            self.latest_statuses = statuses
         return statuses
 
     def _poll_pose_estimate(self, now: Optional[float] = None) -> Dict[int, MotorStatus]:
         if now is None:
             now = time.monotonic()
         statuses = self._read_statuses()
-        if self.last_pose_poll_monotonic is None:
-            dt_s = 0.0
-        else:
-            dt_s = clamp(now - self.last_pose_poll_monotonic, 0.0, 2.0)
-        self.last_pose_poll_monotonic = now
-        actual_pan_raw, actual_truck_raw = self._logical_actual_speeds(statuses)
-        self.latest_actual_pan_raw = actual_pan_raw
-        self.latest_actual_truck_raw = actual_truck_raw
-        self.pose_estimator.update(dt_s, actual_pan_raw, actual_truck_raw)
-        self._enforce_soft_limits_immediately()
+        with self._motor_lock:
+            if self.last_pose_poll_monotonic is None:
+                dt_s = 0.0
+            else:
+                dt_s = clamp(now - self.last_pose_poll_monotonic, 0.0, 2.0)
+            self.last_pose_poll_monotonic = now
+            actual_pan_raw, actual_truck_raw = self._logical_actual_speeds(statuses)
+            self.latest_actual_pan_raw = actual_pan_raw
+            self.latest_actual_truck_raw = actual_truck_raw
+            self.pose_estimator.update(dt_s, actual_pan_raw, actual_truck_raw)
+            self._enforce_soft_limits_immediately()
         return statuses
+
+    def _safety_loop(self) -> None:
+        poll_s = max(0.001, float(self.config.control.status_poll_s))
+        LOG.info("safety_loop=start poll_s=%.3f", poll_s)
+        while not self._safety_stop_event.is_set():
+            try:
+                if self.armed and self.pose_estimator.valid:
+                    self._poll_pose_estimate()
+            except Exception:
+                LOG.exception("safety_loop_fault")
+                try:
+                    self.disarm("safety_loop_fault")
+                except Exception:
+                    LOG.exception("safety_loop_disarm_failed")
+            self._safety_stop_event.wait(poll_s)
+        LOG.info("safety_loop=stop")
 
     def _enforce_soft_limits_immediately(self) -> None:
         if self.config.motor.pan_enabled and self.logical_pan_command != 0 and self.pose_estimator.blocks_pan(self.logical_pan_command):
@@ -347,17 +370,28 @@ class MotorControllerApp:
                 )
             self.logical_pan_command = 0
             self.driver_pan_command = 0
-        if self.config.motor.truck_enabled and self.logical_truck_command != 0 and self.pose_estimator.blocks_truck(self.logical_truck_command):
-            self.motor_bus.stop(self.config.motor.truck_motor_id)
-            if self.config.motor.debug:
-                LOG.info(
-                    "soft_limit_immediate axis=truck pose_rail=%.3f cmd_logical=%s cmd_driver=%s",
-                    self.pose_estimator.pose.rail_position_m,
-                    self.logical_truck_command,
-                    self.driver_truck_command,
-                )
-            self.logical_truck_command = 0
-            self.driver_truck_command = 0
+        if self.config.motor.truck_enabled and self.logical_truck_command != 0:
+            horizon_s = max(0.0, self.config.motor.truck_stop_horizon_s)
+            velocity_m_s = self.latest_actual_truck_raw * self.config.motor.truck_m_per_raw_speed_s
+            predicted_rail = self.pose_estimator.pose.rail_position_m + velocity_m_s * horizon_s
+            truck_min_limit, truck_max_limit = self.pose_estimator.active_truck_limits()
+            predicted_breach = (
+                (predicted_rail >= truck_max_limit and self.logical_truck_command > 0)
+                or (predicted_rail <= truck_min_limit and self.logical_truck_command < 0)
+            )
+            if predicted_breach or self.pose_estimator.blocks_truck(self.logical_truck_command):
+                self.motor_bus.stop(self.config.motor.truck_motor_id)
+                if self.config.motor.debug:
+                    LOG.info(
+                        "soft_limit_immediate axis=truck pose_rail=%.3f predicted_rail=%.3f vel_m_s=%.3f cmd_logical=%s cmd_driver=%s",
+                        self.pose_estimator.pose.rail_position_m,
+                        predicted_rail,
+                        velocity_m_s,
+                        self.logical_truck_command,
+                        self.driver_truck_command,
+                    )
+                self.logical_truck_command = 0
+                self.driver_truck_command = 0
 
     @staticmethod
     def _driver_direction_from_status(status: MotorStatus, fallback_driver_command: int) -> int:
@@ -537,35 +571,31 @@ class MotorControllerApp:
 
     def send_command(self, command: AxisCommand) -> None:
         pan_driver, truck_driver = self._driver_commands(command.pan_raw, command.truck_raw)
-        if self.config.motor.pan_enabled:
-            prev_pan_sign = (self.driver_pan_command > 0) - (self.driver_pan_command < 0)
-            pan_sign = (pan_driver > 0) - (pan_driver < 0)
-            self.motor_bus.set_speed(self.config.motor.pan_motor_id, pan_driver)
-            if pan_driver != 0:
-                if pan_sign != prev_pan_sign:
-                    self.motor_bus.run(self.config.motor.pan_motor_id, direction=pan_sign)
-            else:
-                if prev_pan_sign != 0:
-                    self.motor_bus.stop(self.config.motor.pan_motor_id)
-        if self.config.motor.truck_enabled:
-            prev_truck_sign = (self.driver_truck_command > 0) - (self.driver_truck_command < 0)
-            truck_sign = (truck_driver > 0) - (truck_driver < 0)
-            self.motor_bus.set_speed(self.config.motor.truck_motor_id, truck_driver)
-            if truck_driver != 0:
-                if truck_sign != prev_truck_sign:
-                    self.motor_bus.run(self.config.motor.truck_motor_id, direction=truck_sign)
-            else:
-                if prev_truck_sign != 0:
-                    self.motor_bus.stop(self.config.motor.truck_motor_id)
-        self.logical_pan_command = command.pan_raw
-        self.logical_truck_command = command.truck_raw
-        self.driver_pan_command = pan_driver
-        self.driver_truck_command = truck_driver
-
-    def check_driver_faults(self, statuses: Optional[Dict[int, MotorStatus]] = None) -> None:
-        if statuses is None:
-            statuses = self._read_statuses()
-        self._raise_faults(statuses)
+        with self._motor_lock:
+            if self.config.motor.pan_enabled:
+                prev_pan_sign = (self.driver_pan_command > 0) - (self.driver_pan_command < 0)
+                pan_sign = (pan_driver > 0) - (pan_driver < 0)
+                self.motor_bus.set_speed(self.config.motor.pan_motor_id, pan_driver)
+                if pan_driver != 0:
+                    if pan_sign != prev_pan_sign:
+                        self.motor_bus.run(self.config.motor.pan_motor_id, direction=pan_sign)
+                else:
+                    if prev_pan_sign != 0:
+                        self.motor_bus.stop(self.config.motor.pan_motor_id)
+            if self.config.motor.truck_enabled:
+                prev_truck_sign = (self.driver_truck_command > 0) - (self.driver_truck_command < 0)
+                truck_sign = (truck_driver > 0) - (truck_driver < 0)
+                self.motor_bus.set_speed(self.config.motor.truck_motor_id, truck_driver)
+                if truck_driver != 0:
+                    if truck_sign != prev_truck_sign:
+                        self.motor_bus.run(self.config.motor.truck_motor_id, direction=truck_sign)
+                else:
+                    if prev_truck_sign != 0:
+                        self.motor_bus.stop(self.config.motor.truck_motor_id)
+            self.logical_pan_command = command.pan_raw
+            self.logical_truck_command = command.truck_raw
+            self.driver_pan_command = pan_driver
+            self.driver_truck_command = truck_driver
 
     def log_tick(self, command: AxisCommand, target: Optional[FilteredPoseMessage], now: float) -> None:
         if now - self.last_log_monotonic < self.config.control.log_interval_s:
@@ -668,6 +698,13 @@ class MotorControllerApp:
         self.stop_motors()
         self.client.connect(self.config.mqtt.host, self.config.mqtt.port, keepalive=30)
         self.client.loop_start()
+        self._safety_stop_event.clear()
+        self._safety_thread = threading.Thread(
+            target=self._safety_loop,
+            name="motor_controller_safety",
+            daemon=True,
+        )
+        self._safety_thread.start()
         self.maybe_prompt_arm()
 
     def loop_once(self) -> None:
@@ -679,8 +716,6 @@ class MotorControllerApp:
         self.last_loop_monotonic = now
 
         try:
-            statuses = self._poll_pose_estimate(now)
-
             if not self.armed or not self.pose_estimator.valid or not self.mqtt_connected:
                 self.stop_motors()
                 self.log_tick(AxisCommand(0, 0, "UNARMED_INVALID_POSE", None, None, "none"), None, now)
@@ -692,7 +727,9 @@ class MotorControllerApp:
                 self.log_tick(AxisCommand(0, 0, "NO_VALID_FILTERED_TARGET", None, None, "none"), None, now)
                 return
 
-            self.check_driver_faults(statuses)
+            statuses = dict(self.latest_statuses)
+            if statuses:
+                self._raise_faults(statuses)
             command = self.build_command(target, now, dt_s)
             self.send_command(command)
             self.log_tick(command, target, now)
@@ -735,17 +772,17 @@ class MotorControllerApp:
             while self.running:
                 tick_started = time.monotonic()
                 self.loop_once()
-                deadline = tick_started + tick_s
-                while self.running:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0.0:
-                        break
-                    time.sleep(min(self.config.control.status_poll_s, remaining))
-                    self._poll_pose_estimate()
+                remaining = (tick_started + tick_s) - time.monotonic()
+                if remaining > 0.0:
+                    time.sleep(remaining)
         except KeyboardInterrupt:
             LOG.warning("shutdown=keyboard_interrupt")
         finally:
             self.running = False
+            self._safety_stop_event.set()
+            if self._safety_thread is not None:
+                self._safety_thread.join(timeout=2.0)
+                self._safety_thread = None
             try:
                 self.stop_motors()
             except Exception:
