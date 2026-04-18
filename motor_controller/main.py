@@ -397,10 +397,12 @@ class MotorControllerApp:
         if truck_enabled and not pan_enabled:
             mode = "TRUCK_ONLY_TRACK"
             pan_raw = 0
-            if self.pose_estimator.blocks_truck(truck_raw):
+            truck_blocked = self.pose_estimator.blocks_truck(truck_raw)
+            if truck_blocked:
                 truck_raw = 0
                 mode += "_TRUCK_SOFT_LIMIT"
-            truck_raw = self._ramp(self.logical_truck_command, truck_raw, dt_s)
+            if not truck_blocked:
+                truck_raw = self._ramp(self.logical_truck_command, truck_raw, dt_s)
             return AxisCommand(
                 pan_raw=0,
                 truck_raw=truck_raw,
@@ -413,10 +415,12 @@ class MotorControllerApp:
         if pan_enabled and not truck_enabled:
             mode = "PAN_ONLY_TRACK"
             truck_raw = 0
-            if self.pose_estimator.blocks_pan(pan_raw):
+            pan_blocked = self.pose_estimator.blocks_pan(pan_raw)
+            if pan_blocked:
                 pan_raw = 0
                 mode += "_PAN_SOFT_LIMIT"
-            pan_raw = self._ramp(self.logical_pan_command, pan_raw, dt_s)
+            if not pan_blocked:
+                pan_raw = self._ramp(self.logical_pan_command, pan_raw, dt_s)
             return AxisCommand(
                 pan_raw=pan_raw,
                 truck_raw=0,
@@ -449,15 +453,19 @@ class MotorControllerApp:
             mode = "PAN_TRIM_WAITING_FOR_TRUCK"
             truck_raw = 0
 
-        if self.pose_estimator.blocks_pan(pan_raw):
+        pan_blocked = self.pose_estimator.blocks_pan(pan_raw)
+        if pan_blocked:
             pan_raw = 0
             mode += "_PAN_SOFT_LIMIT"
-        if self.pose_estimator.blocks_truck(truck_raw):
+        truck_blocked = self.pose_estimator.blocks_truck(truck_raw)
+        if truck_blocked:
             truck_raw = 0
             mode += "_TRUCK_SOFT_LIMIT"
 
-        pan_raw = self._ramp(self.logical_pan_command, pan_raw, dt_s)
-        truck_raw = self._ramp(self.logical_truck_command, truck_raw, dt_s)
+        if not pan_blocked:
+            pan_raw = self._ramp(self.logical_pan_command, pan_raw, dt_s)
+        if not truck_blocked:
+            truck_raw = self._ramp(self.logical_truck_command, truck_raw, dt_s)
         return AxisCommand(
             pan_raw=pan_raw,
             truck_raw=truck_raw,
@@ -571,7 +579,31 @@ class MotorControllerApp:
             self.check_driver_faults(post_statuses)
             self.log_tick(command, target, now)
         except ProjectionError as exc:
-            LOG.warning("projection_rejected selected=%s reason=%s", self.selected_node, exc)
+            pose = self.pose_estimator.pose
+            target = self.poses.get(self.selected_node)
+            if target is None:
+                LOG.warning(
+                    "projection_rejected selected=%s reason=%s pose_est=(rail=%.3f,x=%.3f,y=%.3f,pan=%.2f)",
+                    self.selected_node,
+                    exc,
+                    pose.rail_position_m,
+                    pose.x_m,
+                    pose.y_m,
+                    pose.pan_deg,
+                )
+            else:
+                LOG.warning(
+                    "projection_rejected selected=%s reason=%s target=(%.3f,%.3f) "
+                    "pose_est=(rail=%.3f,x=%.3f,y=%.3f,pan=%.2f)",
+                    self.selected_node,
+                    exc,
+                    target.x_m,
+                    target.y_m,
+                    pose.rail_position_m,
+                    pose.x_m,
+                    pose.y_m,
+                    pose.pan_deg,
+                )
             self.stop_motors()
         except Exception:
             LOG.exception("control_loop_fault_stopping_motors")
@@ -614,7 +646,8 @@ def main() -> None:
     config = load_runtime_config()
     LOG.warning(
         "motor_controller=start live=%s selected=%s camera=%s %sx%s pan_enabled=%s truck_enabled=%s "
-        "pan_motor=%s truck_motor=%s rail_origin=(%.3f,%.3f) rail_heading_deg=%.2f start_rail_m=%.3f",
+        "pan_motor=%s truck_motor=%s rail_origin=(%.3f,%.3f) rail_heading_deg=%.2f start_rail_m=%.3f "
+        "rail_limits=(%.3f,%.3f)",
         int(config.motor.enable_live),
         config.mqtt.target_node,
         config.camera.profile,
@@ -628,6 +661,8 @@ def main() -> None:
         config.camera_pose.rail_origin_y_m,
         config.camera_pose.rail_heading_deg,
         config.camera_pose.start_rail_m,
+        config.motor.truck_min_rail_m,
+        config.motor.truck_max_rail_m,
     )
     app = MotorControllerApp(config)
 
