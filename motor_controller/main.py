@@ -331,7 +331,32 @@ class MotorControllerApp:
         self.latest_actual_pan_raw = actual_pan_raw
         self.latest_actual_truck_raw = actual_truck_raw
         self.pose_estimator.update(dt_s, actual_pan_raw, actual_truck_raw)
+        self._enforce_soft_limits_immediately()
         return statuses
+
+    def _enforce_soft_limits_immediately(self) -> None:
+        if self.config.motor.pan_enabled and self.logical_pan_command != 0 and self.pose_estimator.blocks_pan(self.logical_pan_command):
+            self.motor_bus.stop(self.config.motor.pan_motor_id)
+            if self.config.motor.debug:
+                LOG.info(
+                    "soft_limit_immediate axis=pan pose_pan=%.3f cmd_logical=%s cmd_driver=%s",
+                    self.pose_estimator.pose.pan_deg,
+                    self.logical_pan_command,
+                    self.driver_pan_command,
+                )
+            self.logical_pan_command = 0
+            self.driver_pan_command = 0
+        if self.config.motor.truck_enabled and self.logical_truck_command != 0 and self.pose_estimator.blocks_truck(self.logical_truck_command):
+            self.motor_bus.stop(self.config.motor.truck_motor_id)
+            if self.config.motor.debug:
+                LOG.info(
+                    "soft_limit_immediate axis=truck pose_rail=%.3f cmd_logical=%s cmd_driver=%s",
+                    self.pose_estimator.pose.rail_position_m,
+                    self.logical_truck_command,
+                    self.driver_truck_command,
+                )
+            self.logical_truck_command = 0
+            self.driver_truck_command = 0
 
     @staticmethod
     def _driver_direction_from_status(status: MotorStatus, fallback_driver_command: int) -> int:
