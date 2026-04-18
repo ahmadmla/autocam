@@ -208,15 +208,11 @@ class Bld305sMotorBus:
         actual_speed = self.read_reg(motor_id, REG_ACTUAL_SPEED)[0]
         run_status = self.read_reg(motor_id, REG_RUN_STATUS)[0]
         fault_code = self.read_reg(motor_id, REG_FAULT_CODE)[0]
-        current_raw = self.read_reg(motor_id, REG_ACTUAL_CURRENT)[0]
-        voltage_raw = self.read_reg(motor_id, REG_ACTUAL_VOLTAGE)[0]
         return MotorStatus(
             motor_id=motor_id,
             actual_speed_raw=actual_speed,
             run_status=run_status,
             fault_code=fault_code,
-            current_raw=current_raw,
-            voltage_raw=voltage_raw,
         )
 
 

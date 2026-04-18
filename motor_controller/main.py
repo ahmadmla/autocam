@@ -325,7 +325,7 @@ class MotorControllerApp:
         if self.last_pose_poll_monotonic is None:
             dt_s = 0.0
         else:
-            dt_s = clamp(now - self.last_pose_poll_monotonic, 0.0, 0.25)
+            dt_s = clamp(now - self.last_pose_poll_monotonic, 0.0, 2.0)
         self.last_pose_poll_monotonic = now
         actual_pan_raw, actual_truck_raw = self._logical_actual_speeds(statuses)
         self.latest_actual_pan_raw = actual_pan_raw

@@ -161,7 +161,7 @@ class CameraPoseEstimator:
     def update(self, dt_s: float, logical_pan_raw: float, logical_truck_raw: float) -> EstimatedCameraPose:
         if not self.valid:
             return self.pose
-        dt = clamp(float(dt_s), 0.0, 0.25)
+        dt = clamp(float(dt_s), 0.0, 2.0)
         if self.motor_config.pan_enabled:
             next_pan = clamp(
                 self.pose.pan_deg + logical_pan_raw * self.motor_config.pan_deg_per_raw_speed_s * dt,
