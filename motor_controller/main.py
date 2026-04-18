@@ -84,6 +84,7 @@ class MotorControllerApp:
         self.running = True
         self.mqtt_connected = False
         self.last_loop_monotonic: Optional[float] = None
+        self.last_pose_poll_monotonic: Optional[float] = None
         self.last_log_monotonic = 0.0
         self.centered_since_monotonic: Optional[float] = None
         self.truck_error_filtered = 0.0
@@ -91,6 +92,8 @@ class MotorControllerApp:
         self.logical_truck_command = 0
         self.driver_pan_command = 0
         self.driver_truck_command = 0
+        self.latest_actual_pan_raw = 0.0
+        self.latest_actual_truck_raw = 0.0
         self.latest_statuses: Dict[int, MotorStatus] = {}
 
         try:
@@ -315,6 +318,21 @@ class MotorControllerApp:
         self.latest_statuses = statuses
         return statuses
 
+    def _poll_pose_estimate(self, now: Optional[float] = None) -> Dict[int, MotorStatus]:
+        if now is None:
+            now = time.monotonic()
+        statuses = self._read_statuses()
+        if self.last_pose_poll_monotonic is None:
+            dt_s = 0.0
+        else:
+            dt_s = clamp(now - self.last_pose_poll_monotonic, 0.0, 0.25)
+        self.last_pose_poll_monotonic = now
+        actual_pan_raw, actual_truck_raw = self._logical_actual_speeds(statuses)
+        self.latest_actual_pan_raw = actual_pan_raw
+        self.latest_actual_truck_raw = actual_truck_raw
+        self.pose_estimator.update(dt_s, actual_pan_raw, actual_truck_raw)
+        return statuses
+
     @staticmethod
     def _driver_direction_from_status(status: MotorStatus, fallback_driver_command: int) -> int:
         if status.run_status == RUN_FORWARD:
@@ -509,39 +527,91 @@ class MotorControllerApp:
             return
         self.last_log_monotonic = now
         pose = self.pose_estimator.pose
+        debug_enabled = self.config.motor.debug
         if target is None or command.projected is None:
+            if debug_enabled:
+                active_truck_min, active_truck_max = self.pose_estimator.active_truck_limits()
+                LOG.info(
+                    "tick armed=%s selected=%s target=none pose_est=rail=%.3f x=%.3f y=%.3f pan=%.2f "
+                    "truck_limits_loaded=(%.3f,%.3f) truck_limits_active=(%.3f,%.3f) actual_logical=(%.1f,%.1f) cmd=0,0",
+                    int(self.armed),
+                    self.selected_node,
+                    pose.rail_position_m,
+                    pose.x_m,
+                    pose.y_m,
+                    pose.pan_deg,
+                    self.config.motor.truck_min_rail_m,
+                    self.config.motor.truck_max_rail_m,
+                    active_truck_min,
+                    active_truck_max,
+                    self.latest_actual_pan_raw,
+                    self.latest_actual_truck_raw,
+                )
+            else:
+                LOG.info(
+                    "tick armed=%s selected=%s target=none pose_est=rail=%.3f x=%.3f y=%.3f pan=%.2f cmd=0,0",
+                    int(self.armed),
+                    self.selected_node,
+                    pose.rail_position_m,
+                    pose.x_m,
+                    pose.y_m,
+                    pose.pan_deg,
+                )
+            return
+        if debug_enabled:
+            active_truck_min, active_truck_max = self.pose_estimator.active_truck_limits()
             LOG.info(
-                "tick armed=%s selected=%s target=none pose_est=rail=%.3f x=%.3f y=%.3f pan=%.2f cmd=0,0",
+                "tick armed=%s selected=%s q=%.2f filt=(%.3f,%.3f) pose_est=(rail=%.3f,x=%.3f,y=%.3f,pan=%.2f) "
+                "truck_limits_loaded=(%.3f,%.3f) truck_limits_active=(%.3f,%.3f) actual_logical=(%.1f,%.1f) "
+                "px=(%.1f,%.1f) err_x=%.1f mode=%s source=%s cmd_logical=(%s,%s) cmd_driver=(%s,%s)",
                 int(self.armed),
-                self.selected_node,
+                target.node_id,
+                target.quality_score,
+                target.x_m,
+                target.y_m,
                 pose.rail_position_m,
                 pose.x_m,
                 pose.y_m,
                 pose.pan_deg,
+                self.config.motor.truck_min_rail_m,
+                self.config.motor.truck_max_rail_m,
+                active_truck_min,
+                active_truck_max,
+                self.latest_actual_pan_raw,
+                self.latest_actual_truck_raw,
+                command.projected.x_px,
+                command.projected.y_px,
+                command.error_x_px or 0.0,
+                command.mode,
+                command.source,
+                command.pan_raw,
+                command.truck_raw,
+                self.driver_pan_command,
+                self.driver_truck_command,
             )
-            return
-        LOG.info(
-            "tick armed=%s selected=%s q=%.2f filt=(%.3f,%.3f) pose_est=(rail=%.3f,x=%.3f,y=%.3f,pan=%.2f) "
-            "px=(%.1f,%.1f) err_x=%.1f mode=%s source=%s cmd_logical=(%s,%s) cmd_driver=(%s,%s)",
-            int(self.armed),
-            target.node_id,
-            target.quality_score,
-            target.x_m,
-            target.y_m,
-            pose.rail_position_m,
-            pose.x_m,
-            pose.y_m,
-            pose.pan_deg,
-            command.projected.x_px,
-            command.projected.y_px,
-            command.error_x_px or 0.0,
-            command.mode,
-            command.source,
-            command.pan_raw,
-            command.truck_raw,
-            self.driver_pan_command,
-            self.driver_truck_command,
-        )
+        else:
+            LOG.info(
+                "tick armed=%s selected=%s q=%.2f filt=(%.3f,%.3f) pose_est=(rail=%.3f,x=%.3f,y=%.3f,pan=%.2f) "
+                "px=(%.1f,%.1f) err_x=%.1f mode=%s source=%s cmd_logical=(%s,%s) cmd_driver=(%s,%s)",
+                int(self.armed),
+                target.node_id,
+                target.quality_score,
+                target.x_m,
+                target.y_m,
+                pose.rail_position_m,
+                pose.x_m,
+                pose.y_m,
+                pose.pan_deg,
+                command.projected.x_px,
+                command.projected.y_px,
+                command.error_x_px or 0.0,
+                command.mode,
+                command.source,
+                command.pan_raw,
+                command.truck_raw,
+                self.driver_pan_command,
+                self.driver_truck_command,
+            )
 
     def setup(self) -> None:
         self.motor_bus.connect()
@@ -562,9 +632,7 @@ class MotorControllerApp:
         self.last_loop_monotonic = now
 
         try:
-            statuses = self._read_statuses()
-            actual_pan_raw, actual_truck_raw = self._logical_actual_speeds(statuses)
-            self.pose_estimator.update(dt_s, actual_pan_raw, actual_truck_raw)
+            statuses = self._poll_pose_estimate(now)
 
             if not self.armed or not self.pose_estimator.valid or not self.mqtt_connected:
                 self.stop_motors()
@@ -620,8 +688,15 @@ class MotorControllerApp:
         try:
             self.setup()
             while self.running:
+                tick_started = time.monotonic()
                 self.loop_once()
-                time.sleep(tick_s)
+                deadline = tick_started + tick_s
+                while self.running:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0.0:
+                        break
+                    time.sleep(min(self.config.control.status_poll_s, remaining))
+                    self._poll_pose_estimate()
         except KeyboardInterrupt:
             LOG.warning("shutdown=keyboard_interrupt")
         finally:
@@ -650,10 +725,11 @@ def main() -> None:
     setup_logging()
     config = load_runtime_config()
     LOG.warning(
-        "motor_controller=start live=%s selected=%s camera=%s %sx%s pan_enabled=%s truck_enabled=%s "
+        "motor_controller=start live=%s debug=%s selected=%s camera=%s %sx%s pan_enabled=%s truck_enabled=%s "
         "pan_motor=%s truck_motor=%s rail_origin=(%.3f,%.3f) rail_heading_deg=%.2f start_rail_m=%.3f "
-        "rail_limits=(%.3f,%.3f) rail_soft_margin=%.3f",
+        "rail_limits=(%.3f,%.3f) rail_soft_margin=%.3f control_hz=%.1f status_poll_s=%.3f",
         int(config.motor.enable_live),
+        int(config.motor.debug),
         config.mqtt.target_node,
         config.camera.profile,
         config.camera.image_w,
@@ -669,6 +745,8 @@ def main() -> None:
         config.motor.truck_min_rail_m,
         config.motor.truck_max_rail_m,
         config.motor.truck_soft_limit_margin_m,
+        config.control.control_hz,
+        config.control.status_poll_s,
     )
     app = MotorControllerApp(config)
 

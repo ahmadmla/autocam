@@ -144,6 +144,9 @@ class CameraPoseEstimator:
             return midpoint, midpoint
         return min_limit, max_limit
 
+    def active_truck_limits(self) -> Tuple[float, float]:
+        return self._active_truck_limits()
+
     def reset_to_start(self) -> EstimatedCameraPose:
         self.pose = self._pose_from_rail(
             self.pose_config.start_rail_m,

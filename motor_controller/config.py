@@ -85,6 +85,7 @@ class CameraPoseConfig:
 @dataclass(frozen=True)
 class MotorRuntimeConfig:
     enable_live: bool
+    debug: bool
     port: str
     baudrate: int
     timeout_s: float
@@ -113,6 +114,7 @@ class ControlRuntimeConfig:
     target_stale_s: float
     min_quality: float
     control_hz: float
+    status_poll_s: float
     pan_image_deadband_px: float
     truck_image_deadband_px: float
     pan_prealign_threshold_px: float
@@ -222,6 +224,7 @@ def load_runtime_config() -> RuntimeConfig:
     legacy_truck_max_x_m = env_float("TRUCK_MAX_X_M", 1.0)
     motor = MotorRuntimeConfig(
         enable_live=env_bool("MOTOR_ENABLE_LIVE", False),
+        debug=env_bool("MOTOR_DEBUG", False),
         port=env_str("MOTOR_MODBUS_PORT", "/dev/ttyUSB0"),
         baudrate=env_int("MOTOR_MODBUS_BAUD", 9600),
         timeout_s=env_float("MOTOR_MODBUS_TIMEOUT_S", 1.0),
@@ -254,6 +257,13 @@ def load_runtime_config() -> RuntimeConfig:
         target_stale_s=env_float("MOTOR_TARGET_STALE_S", 0.75),
         min_quality=env_float("MOTOR_MIN_QUALITY", 0.55),
         control_hz=max(env_float("PAN_CONTROL_HZ", 20.0), 1.0),
+        status_poll_s=max(
+            0.005,
+            env_float(
+                "MOTOR_STATUS_POLL_S",
+                env_float("MOTOR_MANUAL_STATUS_POLL_S", 1.0 / max(env_float("PAN_CONTROL_HZ", 20.0), 1.0)),
+            ),
+        ),
         pan_image_deadband_px=env_float("PAN_IMAGE_DEADBAND_PX", 40.0),
         truck_image_deadband_px=env_float("TRUCK_IMAGE_DEADBAND_PX", 80.0),
         pan_prealign_threshold_px=env_float("PAN_PREALIGN_THRESHOLD_PX", 160.0),
