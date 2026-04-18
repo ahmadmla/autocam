@@ -548,7 +548,7 @@ class MotorControllerApp:
         self._raise_faults(statuses)
 
     def log_tick(self, command: AxisCommand, target: Optional[FilteredPoseMessage], now: float) -> None:
-        if now - self.last_log_monotonic < 1.0:
+        if now - self.last_log_monotonic < self.config.control.log_interval_s:
             return
         self.last_log_monotonic = now
         pose = self.pose_estimator.pose
@@ -754,7 +754,7 @@ def main() -> None:
     LOG.warning(
         "motor_controller=start live=%s debug=%s selected=%s camera=%s %sx%s pan_enabled=%s truck_enabled=%s "
         "pan_motor=%s truck_motor=%s rail_origin=(%.3f,%.3f) rail_heading_deg=%.2f start_rail_m=%.3f "
-        "rail_limits=(%.3f,%.3f) rail_soft_margin=%.3f control_hz=%.1f status_poll_s=%.3f",
+        "rail_limits=(%.3f,%.3f) rail_soft_margin=%.3f control_hz=%.1f status_poll_s=%.3f log_interval_s=%.3f",
         int(config.motor.enable_live),
         int(config.motor.debug),
         config.mqtt.target_node,
@@ -774,6 +774,7 @@ def main() -> None:
         config.motor.truck_soft_limit_margin_m,
         config.control.control_hz,
         config.control.status_poll_s,
+        config.control.log_interval_s,
     )
     app = MotorControllerApp(config)
 

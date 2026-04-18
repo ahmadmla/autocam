@@ -115,6 +115,7 @@ class ControlRuntimeConfig:
     min_quality: float
     control_hz: float
     status_poll_s: float
+    log_interval_s: float
     pan_image_deadband_px: float
     truck_image_deadband_px: float
     pan_prealign_threshold_px: float
@@ -264,6 +265,7 @@ def load_runtime_config() -> RuntimeConfig:
                 env_float("MOTOR_MANUAL_STATUS_POLL_S", 1.0 / max(env_float("PAN_CONTROL_HZ", 20.0), 1.0)),
             ),
         ),
+        log_interval_s=max(0.0, env_float("MOTOR_LOG_INTERVAL_S", 1.0)),
         pan_image_deadband_px=env_float("PAN_IMAGE_DEADBAND_PX", 40.0),
         truck_image_deadband_px=env_float("TRUCK_IMAGE_DEADBAND_PX", 80.0),
         pan_prealign_threshold_px=env_float("PAN_PREALIGN_THRESHOLD_PX", 160.0),
