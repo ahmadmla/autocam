@@ -103,6 +103,7 @@ class MotorRuntimeConfig:
     pan_max_deg: float
     truck_min_rail_m: float
     truck_max_rail_m: float
+    truck_soft_limit_margin_m: float
     confirm_recentered: bool
     arm_prompt: bool
 
@@ -239,6 +240,13 @@ def load_runtime_config() -> RuntimeConfig:
         pan_max_deg=env_float("PAN_MAX_DEG", 70.0),
         truck_min_rail_m=env_float("TRUCK_MIN_RAIL_M", legacy_truck_min_x_m),
         truck_max_rail_m=env_float("TRUCK_MAX_RAIL_M", legacy_truck_max_x_m),
+        truck_soft_limit_margin_m=max(
+            0.0,
+            env_float(
+                "TRUCK_SOFT_LIMIT_MARGIN_M",
+                env_float("MOTOR_MANUAL_LIMIT_MARGIN_M", 0.0),
+            ),
+        ),
         confirm_recentered=env_bool("MOTOR_CONFIRM_RECENTERED", False),
         arm_prompt=env_bool("MOTOR_ARM_PROMPT", True),
     )

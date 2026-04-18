@@ -386,7 +386,12 @@ class MotorControllerApp:
         )))
 
         alpha = clamp(self.config.control.truck_error_filter_alpha, 0.0, 1.0)
-        self.truck_error_filtered = (1.0 - alpha) * self.truck_error_filtered + alpha * error_x
+        # Reset the truck error filter when the target crosses sides so the truck can
+        # promptly reverse away from a soft limit instead of dragging old error sign.
+        if self.truck_error_filtered and error_x and (self.truck_error_filtered * error_x < 0.0):
+            self.truck_error_filtered = error_x
+        else:
+            self.truck_error_filtered = (1.0 - alpha) * self.truck_error_filtered + alpha * error_x
         truck_error = self._deadband(self.truck_error_filtered, self.config.control.truck_image_deadband_px)
         truck_raw = int(round(clamp(
             truck_error * self.config.control.truck_kp_raw_per_px,
@@ -647,7 +652,7 @@ def main() -> None:
     LOG.warning(
         "motor_controller=start live=%s selected=%s camera=%s %sx%s pan_enabled=%s truck_enabled=%s "
         "pan_motor=%s truck_motor=%s rail_origin=(%.3f,%.3f) rail_heading_deg=%.2f start_rail_m=%.3f "
-        "rail_limits=(%.3f,%.3f)",
+        "rail_limits=(%.3f,%.3f) rail_soft_margin=%.3f",
         int(config.motor.enable_live),
         config.mqtt.target_node,
         config.camera.profile,
@@ -663,6 +668,7 @@ def main() -> None:
         config.camera_pose.start_rail_m,
         config.motor.truck_min_rail_m,
         config.motor.truck_max_rail_m,
+        config.motor.truck_soft_limit_margin_m,
     )
     app = MotorControllerApp(config)
 

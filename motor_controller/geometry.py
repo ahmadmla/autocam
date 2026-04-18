@@ -135,6 +135,15 @@ class CameraPoseEstimator:
             roll_deg=self.pose_config.roll_deg,
         )
 
+    def _active_truck_limits(self) -> Tuple[float, float]:
+        margin = max(0.0, self.motor_config.truck_soft_limit_margin_m)
+        min_limit = self.motor_config.truck_min_rail_m + margin
+        max_limit = self.motor_config.truck_max_rail_m - margin
+        if min_limit > max_limit:
+            midpoint = (self.motor_config.truck_min_rail_m + self.motor_config.truck_max_rail_m) / 2.0
+            return midpoint, midpoint
+        return min_limit, max_limit
+
     def reset_to_start(self) -> EstimatedCameraPose:
         self.pose = self._pose_from_rail(
             self.pose_config.start_rail_m,
@@ -150,11 +159,20 @@ class CameraPoseEstimator:
         if not self.valid:
             return self.pose
         dt = clamp(float(dt_s), 0.0, 0.25)
-        next_pan = self.pose.pan_deg + logical_pan_raw * self.motor_config.pan_deg_per_raw_speed_s * dt
+        if self.motor_config.pan_enabled:
+            next_pan = clamp(
+                self.pose.pan_deg + logical_pan_raw * self.motor_config.pan_deg_per_raw_speed_s * dt,
+                self.motor_config.pan_min_deg,
+                self.motor_config.pan_max_deg,
+            )
+        else:
+            # In truck-only mode the camera has a fixed heading; preserve the configured startup pan.
+            next_pan = self.pose.pan_deg
         next_rail = self.pose.rail_position_m + logical_truck_raw * self.motor_config.truck_m_per_raw_speed_s * dt
+        truck_min_limit, truck_max_limit = self._active_truck_limits()
         self.pose = self._pose_from_rail(
-            clamp(next_rail, self.motor_config.truck_min_rail_m, self.motor_config.truck_max_rail_m),
-            clamp(next_pan, self.motor_config.pan_min_deg, self.motor_config.pan_max_deg),
+            clamp(next_rail, truck_min_limit, truck_max_limit),
+            next_pan,
         )
         return self.pose
 
@@ -165,7 +183,8 @@ class CameraPoseEstimator:
         )
 
     def blocks_truck(self, logical_raw: float) -> bool:
+        truck_min_limit, truck_max_limit = self._active_truck_limits()
         return (
-            (self.pose.rail_position_m <= self.motor_config.truck_min_rail_m and logical_raw < 0.0)
-            or (self.pose.rail_position_m >= self.motor_config.truck_max_rail_m and logical_raw > 0.0)
+            (self.pose.rail_position_m <= truck_min_limit and logical_raw < 0.0)
+            or (self.pose.rail_position_m >= truck_max_limit and logical_raw > 0.0)
         )
