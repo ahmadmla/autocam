@@ -526,17 +526,25 @@ class MotorControllerApp:
     def send_command(self, command: AxisCommand) -> None:
         pan_driver, truck_driver = self._driver_commands(command.pan_raw, command.truck_raw)
         if self.config.motor.pan_enabled:
+            prev_pan_sign = (self.driver_pan_command > 0) - (self.driver_pan_command < 0)
+            pan_sign = (pan_driver > 0) - (pan_driver < 0)
             self.motor_bus.set_speed(self.config.motor.pan_motor_id, pan_driver)
             if pan_driver != 0:
-                self.motor_bus.run(self.config.motor.pan_motor_id, direction=1 if pan_driver > 0 else -1)
+                if pan_sign != prev_pan_sign:
+                    self.motor_bus.run(self.config.motor.pan_motor_id, direction=pan_sign)
             else:
-                self.motor_bus.stop(self.config.motor.pan_motor_id)
+                if prev_pan_sign != 0:
+                    self.motor_bus.stop(self.config.motor.pan_motor_id)
         if self.config.motor.truck_enabled:
+            prev_truck_sign = (self.driver_truck_command > 0) - (self.driver_truck_command < 0)
+            truck_sign = (truck_driver > 0) - (truck_driver < 0)
             self.motor_bus.set_speed(self.config.motor.truck_motor_id, truck_driver)
             if truck_driver != 0:
-                self.motor_bus.run(self.config.motor.truck_motor_id, direction=1 if truck_driver > 0 else -1)
+                if truck_sign != prev_truck_sign:
+                    self.motor_bus.run(self.config.motor.truck_motor_id, direction=truck_sign)
             else:
-                self.motor_bus.stop(self.config.motor.truck_motor_id)
+                if prev_truck_sign != 0:
+                    self.motor_bus.stop(self.config.motor.truck_motor_id)
         self.logical_pan_command = command.pan_raw
         self.logical_truck_command = command.truck_raw
         self.driver_pan_command = pan_driver
@@ -675,8 +683,6 @@ class MotorControllerApp:
             self.check_driver_faults(statuses)
             command = self.build_command(target, now, dt_s)
             self.send_command(command)
-            post_statuses = self._read_statuses()
-            self.check_driver_faults(post_statuses)
             self.log_tick(command, target, now)
         except ProjectionError as exc:
             pose = self.pose_estimator.pose
