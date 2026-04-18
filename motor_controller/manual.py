@@ -1023,6 +1023,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     confirm = input("Type YES to save these values: ").strip()
                     if confirm == "YES":
                         upsert_env_values(env_path, updates)
+                        for key, value in updates.items():
+                            os.environ[key] = value
                         print(f"Saved {len(updates)} values to {env_path}", flush=True)
                     else:
                         print("Cancelled .env update.", flush=True)
