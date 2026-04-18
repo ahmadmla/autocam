@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import math
+import os
 import sys
 import time
 from dataclasses import dataclass, replace
@@ -687,6 +688,32 @@ class ManualMotorSession:
             "CAMERA_START_PAN_DEG": f"{startup_center:.4f}",
         }
 
+    def build_handoff_env_updates(self) -> dict[str, str]:
+        if self.axis.axis_name == "truck":
+            updates = {
+                "TRUCK_SIGN": str(self.axis.driver_sign),
+                "CAMERA_START_X_M": f"{self.axis.estimated_position:.4f}",
+            }
+            left_value = self.axis.conservative_left(self.settings.limit_margin)
+            right_value = self.axis.conservative_right(self.settings.limit_margin)
+            if left_value is not None:
+                updates["TRUCK_MIN_X_M"] = f"{left_value:.4f}"
+            if right_value is not None:
+                updates["TRUCK_MAX_X_M"] = f"{right_value:.4f}"
+            return updates
+
+        updates = {
+            "PAN_SIGN": str(self.axis.driver_sign),
+            "CAMERA_START_PAN_DEG": f"{self.axis.estimated_position:.4f}",
+        }
+        left_value = self.axis.conservative_left(self.settings.limit_margin)
+        right_value = self.axis.conservative_right(self.settings.limit_margin)
+        if left_value is not None:
+            updates["PAN_MIN_DEG"] = f"{left_value:.4f}"
+        if right_value is not None:
+            updates["PAN_MAX_DEG"] = f"{right_value:.4f}"
+        return updates
+
     def build_env_updates(self) -> dict[str, str]:
         updates = self.build_base_env_updates()
         if self.axis.axis_name == "truck":
@@ -836,8 +863,26 @@ def print_help(axis_name: str) -> None:
     print("  status           print current status and suggested env values", flush=True)
     print("  stop             send an immediate stop", flush=True)
     print("  save-env         confirm and write the current suggested values into ../.env", flush=True)
+    print("  auto             launch automatic mode using the current estimated pose for this axis", flush=True)
     print("  help             print this help", flush=True)
     print("  quit             stop and exit", flush=True)
+
+
+def launch_auto_mode(session: ManualMotorSession) -> int:
+    handoff_updates = session.build_handoff_env_updates()
+    handoff_updates["MOTOR_CONFIRM_RECENTERED"] = "1"
+    handoff_updates["MOTOR_ARM_PROMPT"] = "0"
+    print("Launching automatic mode with handoff state:", flush=True)
+    for key, value in handoff_updates.items():
+        print(f"  {key}={value}", flush=True)
+        os.environ[key] = value
+    session.close()
+    os.execvpe(
+        sys.executable,
+        [sys.executable, "-m", "motor_controller"],
+        os.environ,
+    )
+    return 0
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -968,6 +1013,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                         print(f"Saved {len(updates)} values to {env_path}", flush=True)
                     else:
                         print("Cancelled .env update.", flush=True)
+                elif command == "auto":
+                    return launch_auto_mode(session)
                 elif command in ("quit", "exit"):
                     break
                 else:
