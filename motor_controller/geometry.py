@@ -172,11 +172,7 @@ class CameraPoseEstimator:
             # In truck-only mode the camera has a fixed heading; preserve the configured startup pan.
             next_pan = self.pose.pan_deg
         next_rail = self.pose.rail_position_m + logical_truck_raw * self.motor_config.truck_m_per_raw_speed_s * dt
-        truck_min_limit, truck_max_limit = self._active_truck_limits()
-        self.pose = self._pose_from_rail(
-            clamp(next_rail, truck_min_limit, truck_max_limit),
-            next_pan,
-        )
+        self.pose = self._pose_from_rail(next_rail, next_pan)
         return self.pose
 
     def blocks_pan(self, logical_raw: float) -> bool:
