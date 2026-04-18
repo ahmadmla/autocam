@@ -130,7 +130,8 @@ class MotorControllerApp:
         self.centered_since_monotonic = None
         self.truck_error_filtered = 0.0
         LOG.warning(
-            "motor_state=armed pose_estimate=x=%.3f y=%.3f pan=%.2f live=%s",
+            "motor_state=armed pose_estimate=rail=%.3f x=%.3f y=%.3f pan=%.2f live=%s",
+            pose.rail_position_m,
             pose.x_m,
             pose.y_m,
             pose.pan_deg,
@@ -497,22 +498,24 @@ class MotorControllerApp:
         pose = self.pose_estimator.pose
         if target is None or command.projected is None:
             LOG.info(
-                "tick armed=%s selected=%s target=none pose_est=x=%.3f y=%.3f pan=%.2f cmd=0,0",
+                "tick armed=%s selected=%s target=none pose_est=rail=%.3f x=%.3f y=%.3f pan=%.2f cmd=0,0",
                 int(self.armed),
                 self.selected_node,
+                pose.rail_position_m,
                 pose.x_m,
                 pose.y_m,
                 pose.pan_deg,
             )
             return
         LOG.info(
-            "tick armed=%s selected=%s q=%.2f filt=(%.3f,%.3f) pose_est=(x=%.3f,y=%.3f,pan=%.2f) "
+            "tick armed=%s selected=%s q=%.2f filt=(%.3f,%.3f) pose_est=(rail=%.3f,x=%.3f,y=%.3f,pan=%.2f) "
             "px=(%.1f,%.1f) err_x=%.1f mode=%s source=%s cmd_logical=(%s,%s) cmd_driver=(%s,%s)",
             int(self.armed),
             target.node_id,
             target.quality_score,
             target.x_m,
             target.y_m,
+            pose.rail_position_m,
             pose.x_m,
             pose.y_m,
             pose.pan_deg,
@@ -610,7 +613,8 @@ def main() -> None:
     setup_logging()
     config = load_runtime_config()
     LOG.warning(
-        "motor_controller=start live=%s selected=%s camera=%s %sx%s pan_enabled=%s truck_enabled=%s pan_motor=%s truck_motor=%s",
+        "motor_controller=start live=%s selected=%s camera=%s %sx%s pan_enabled=%s truck_enabled=%s "
+        "pan_motor=%s truck_motor=%s rail_origin=(%.3f,%.3f) rail_heading_deg=%.2f start_rail_m=%.3f",
         int(config.motor.enable_live),
         config.mqtt.target_node,
         config.camera.profile,
@@ -620,6 +624,10 @@ def main() -> None:
         int(config.motor.truck_enabled),
         config.motor.pan_motor_id,
         config.motor.truck_motor_id,
+        config.camera_pose.rail_origin_x_m,
+        config.camera_pose.rail_origin_y_m,
+        config.camera_pose.rail_heading_deg,
+        config.camera_pose.start_rail_m,
     )
     app = MotorControllerApp(config)
 

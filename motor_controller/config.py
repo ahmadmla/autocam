@@ -72,8 +72,10 @@ class CameraIntrinsics:
 
 @dataclass(frozen=True)
 class CameraPoseConfig:
-    start_x_m: float
-    start_y_m: float
+    rail_origin_x_m: float
+    rail_origin_y_m: float
+    rail_heading_deg: float
+    start_rail_m: float
     start_pan_deg: float
     height_m: float
     pitch_deg: float
@@ -99,8 +101,8 @@ class MotorRuntimeConfig:
     truck_max_raw_speed: int
     pan_min_deg: float
     pan_max_deg: float
-    truck_min_x_m: float
-    truck_max_x_m: float
+    truck_min_rail_m: float
+    truck_max_rail_m: float
     confirm_recentered: bool
     arm_prompt: bool
 
@@ -203,14 +205,20 @@ def load_camera_intrinsics() -> CameraIntrinsics:
 
 def load_runtime_config() -> RuntimeConfig:
     camera = load_camera_intrinsics()
+    legacy_start_x_m = env_float("CAMERA_START_X_M", 0.0)
+    legacy_start_y_m = env_float("CAMERA_START_Y_M", 0.0)
     camera_pose = CameraPoseConfig(
-        start_x_m=env_float("CAMERA_START_X_M", 0.0),
-        start_y_m=env_float("CAMERA_START_Y_M", 0.0),
+        rail_origin_x_m=env_float("CAMERA_RAIL_ORIGIN_X_M", 0.0),
+        rail_origin_y_m=env_float("CAMERA_RAIL_ORIGIN_Y_M", legacy_start_y_m),
+        rail_heading_deg=env_float("CAMERA_RAIL_HEADING_DEG", 0.0),
+        start_rail_m=env_float("CAMERA_START_RAIL_M", legacy_start_x_m),
         start_pan_deg=env_float("CAMERA_START_PAN_DEG", 0.0),
         height_m=env_float("CAMERA_HEIGHT_M", 1.4),
         pitch_deg=env_float("CAMERA_PITCH_DEG", 35.0),
         roll_deg=env_float("CAMERA_ROLL_DEG", 0.0),
     )
+    legacy_truck_min_x_m = env_float("TRUCK_MIN_X_M", -1.0)
+    legacy_truck_max_x_m = env_float("TRUCK_MAX_X_M", 1.0)
     motor = MotorRuntimeConfig(
         enable_live=env_bool("MOTOR_ENABLE_LIVE", False),
         port=env_str("MOTOR_MODBUS_PORT", "/dev/ttyUSB0"),
@@ -229,8 +237,8 @@ def load_runtime_config() -> RuntimeConfig:
         truck_max_raw_speed=env_int("TRUCK_MAX_RAW_SPEED", 60),
         pan_min_deg=env_float("PAN_MIN_DEG", -70.0),
         pan_max_deg=env_float("PAN_MAX_DEG", 70.0),
-        truck_min_x_m=env_float("TRUCK_MIN_X_M", -1.0),
-        truck_max_x_m=env_float("TRUCK_MAX_X_M", 1.0),
+        truck_min_rail_m=env_float("TRUCK_MIN_RAIL_M", legacy_truck_min_x_m),
+        truck_max_rail_m=env_float("TRUCK_MAX_RAIL_M", legacy_truck_max_x_m),
         confirm_recentered=env_bool("MOTOR_CONFIRM_RECENTERED", False),
         arm_prompt=env_bool("MOTOR_ARM_PROMPT", True),
     )

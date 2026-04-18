@@ -25,6 +25,7 @@ class ProjectedPoint:
 
 @dataclass(frozen=True)
 class EstimatedCameraPose:
+    rail_position_m: float
     x_m: float
     y_m: float
     pan_deg: float
@@ -114,23 +115,30 @@ class CameraPoseEstimator:
         self.pose_config = pose_config
         self.motor_config = motor_config
         self.valid = False
-        self.pose = EstimatedCameraPose(
-            x_m=pose_config.start_x_m,
-            y_m=pose_config.start_y_m,
-            pan_deg=pose_config.start_pan_deg,
-            height_m=pose_config.height_m,
-            pitch_deg=pose_config.pitch_deg,
-            roll_deg=pose_config.roll_deg,
-        )
+        self.pose = self._pose_from_rail(pose_config.start_rail_m, pose_config.start_pan_deg)
 
-    def reset_to_start(self) -> EstimatedCameraPose:
-        self.pose = EstimatedCameraPose(
-            x_m=self.pose_config.start_x_m,
-            y_m=self.pose_config.start_y_m,
-            pan_deg=self.pose_config.start_pan_deg,
+    def _world_xy_from_rail(self, rail_position_m: float) -> Tuple[float, float]:
+        heading_rad = math.radians(self.pose_config.rail_heading_deg)
+        world_x_m = self.pose_config.rail_origin_x_m + rail_position_m * math.cos(heading_rad)
+        world_y_m = self.pose_config.rail_origin_y_m + rail_position_m * math.sin(heading_rad)
+        return world_x_m, world_y_m
+
+    def _pose_from_rail(self, rail_position_m: float, pan_deg: float) -> EstimatedCameraPose:
+        world_x_m, world_y_m = self._world_xy_from_rail(rail_position_m)
+        return EstimatedCameraPose(
+            rail_position_m=rail_position_m,
+            x_m=world_x_m,
+            y_m=world_y_m,
+            pan_deg=pan_deg,
             height_m=self.pose_config.height_m,
             pitch_deg=self.pose_config.pitch_deg,
             roll_deg=self.pose_config.roll_deg,
+        )
+
+    def reset_to_start(self) -> EstimatedCameraPose:
+        self.pose = self._pose_from_rail(
+            self.pose_config.start_rail_m,
+            self.pose_config.start_pan_deg,
         )
         self.valid = True
         return self.pose
@@ -143,14 +151,10 @@ class CameraPoseEstimator:
             return self.pose
         dt = clamp(float(dt_s), 0.0, 0.25)
         next_pan = self.pose.pan_deg + logical_pan_raw * self.motor_config.pan_deg_per_raw_speed_s * dt
-        next_x = self.pose.x_m + logical_truck_raw * self.motor_config.truck_m_per_raw_speed_s * dt
-        self.pose = EstimatedCameraPose(
-            x_m=clamp(next_x, self.motor_config.truck_min_x_m, self.motor_config.truck_max_x_m),
-            y_m=self.pose.y_m,
-            pan_deg=clamp(next_pan, self.motor_config.pan_min_deg, self.motor_config.pan_max_deg),
-            height_m=self.pose.height_m,
-            pitch_deg=self.pose.pitch_deg,
-            roll_deg=self.pose.roll_deg,
+        next_rail = self.pose.rail_position_m + logical_truck_raw * self.motor_config.truck_m_per_raw_speed_s * dt
+        self.pose = self._pose_from_rail(
+            clamp(next_rail, self.motor_config.truck_min_rail_m, self.motor_config.truck_max_rail_m),
+            clamp(next_pan, self.motor_config.pan_min_deg, self.motor_config.pan_max_deg),
         )
         return self.pose
 
@@ -162,6 +166,6 @@ class CameraPoseEstimator:
 
     def blocks_truck(self, logical_raw: float) -> bool:
         return (
-            (self.pose.x_m <= self.motor_config.truck_min_x_m and logical_raw < 0.0)
-            or (self.pose.x_m >= self.motor_config.truck_max_x_m and logical_raw > 0.0)
+            (self.pose.rail_position_m <= self.motor_config.truck_min_rail_m and logical_raw < 0.0)
+            or (self.pose.rail_position_m >= self.motor_config.truck_max_rail_m and logical_raw > 0.0)
         )

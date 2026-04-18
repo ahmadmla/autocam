@@ -681,7 +681,7 @@ class ManualMotorSession:
         if self.axis.axis_name == "truck":
             return {
                 "TRUCK_SIGN": str(self.axis.driver_sign),
-                "CAMERA_START_X_M": f"{startup_center:.4f}",
+                "CAMERA_START_RAIL_M": f"{startup_center:.4f}",
             }
         return {
             "PAN_SIGN": str(self.axis.driver_sign),
@@ -692,14 +692,14 @@ class ManualMotorSession:
         if self.axis.axis_name == "truck":
             updates = {
                 "TRUCK_SIGN": str(self.axis.driver_sign),
-                "CAMERA_START_X_M": f"{self.axis.estimated_position:.4f}",
+                "CAMERA_START_RAIL_M": f"{self.axis.estimated_position:.4f}",
             }
             left_value = self.axis.conservative_left(self.settings.limit_margin)
             right_value = self.axis.conservative_right(self.settings.limit_margin)
             if left_value is not None:
-                updates["TRUCK_MIN_X_M"] = f"{left_value:.4f}"
+                updates["TRUCK_MIN_RAIL_M"] = f"{left_value:.4f}"
             if right_value is not None:
-                updates["TRUCK_MAX_X_M"] = f"{right_value:.4f}"
+                updates["TRUCK_MAX_RAIL_M"] = f"{right_value:.4f}"
             return updates
 
         updates = {
@@ -720,9 +720,9 @@ class ManualMotorSession:
             left_value = self.axis.conservative_left(self.settings.limit_margin)
             right_value = self.axis.conservative_right(self.settings.limit_margin)
             if left_value is not None:
-                updates["TRUCK_MIN_X_M"] = f"{left_value:.4f}"
+                updates["TRUCK_MIN_RAIL_M"] = f"{left_value:.4f}"
             if right_value is not None:
-                updates["TRUCK_MAX_X_M"] = f"{right_value:.4f}"
+                updates["TRUCK_MAX_RAIL_M"] = f"{right_value:.4f}"
             if left_value is not None and right_value is not None and left_value >= right_value:
                 raise ValueError("Left/right truck limits overlap or are inverted. Re-zero and re-mark before saving.")
             return updates
@@ -763,10 +763,10 @@ def build_axis_state(axis_name: str) -> ManualAxisState:
                 "MOTOR_MANUAL_TRUCK_M_PER_RAW_SPEED_S",
                 config.motor.truck_m_per_raw_speed_s,
             ),
-            estimated_position=config.camera_pose.start_x_m,
-            unit_name="x_m",
-            configured_left_limit=config.motor.truck_min_x_m,
-            configured_right_limit=config.motor.truck_max_x_m,
+            estimated_position=config.camera_pose.start_rail_m,
+            unit_name="rail_m",
+            configured_left_limit=config.motor.truck_min_rail_m,
+            configured_right_limit=config.motor.truck_max_rail_m,
         )
     if axis_name == "pan":
         return ManualAxisState(
@@ -864,25 +864,38 @@ def print_help(axis_name: str) -> None:
     print("  stop             send an immediate stop", flush=True)
     print("  save-env         confirm and write the current suggested values into ../.env", flush=True)
     print("  auto             launch automatic mode using the current estimated pose for this axis", flush=True)
+    print("  auto-stack       launch the full central stack using the current estimated pose for this axis", flush=True)
     print("  help             print this help", flush=True)
     print("  quit             stop and exit", flush=True)
 
 
-def launch_auto_mode(session: ManualMotorSession) -> int:
+def launch_runtime(session: ManualMotorSession, argv: list[str], *, label: str) -> int:
     handoff_updates = session.build_handoff_env_updates()
     handoff_updates["MOTOR_CONFIRM_RECENTERED"] = "1"
     handoff_updates["MOTOR_ARM_PROMPT"] = "0"
-    print("Launching automatic mode with handoff state:", flush=True)
+    print(f"Launching {label} with handoff state:", flush=True)
     for key, value in handoff_updates.items():
         print(f"  {key}={value}", flush=True)
         os.environ[key] = value
     session.close()
-    os.execvpe(
-        sys.executable,
-        [sys.executable, "-m", "motor_controller"],
-        os.environ,
-    )
+    os.execvpe(sys.executable, [sys.executable, *argv], os.environ)
     return 0
+
+
+def launch_auto_mode(session: ManualMotorSession) -> int:
+    return launch_runtime(
+        session,
+        ["-m", "motor_controller"],
+        label="automatic mode",
+    )
+
+
+def launch_auto_stack(session: ManualMotorSession) -> int:
+    return launch_runtime(
+        session,
+        [str(REPO_ROOT / "run_central_stack.py")],
+        label="central stack",
+    )
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -1015,6 +1028,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                         print("Cancelled .env update.", flush=True)
                 elif command == "auto":
                     return launch_auto_mode(session)
+                elif command == "auto-stack":
+                    return launch_auto_stack(session)
                 elif command in ("quit", "exit"):
                     break
                 else:
