@@ -20,10 +20,10 @@ if __package__ in (None, ""):
         if candidate not in sys.path:
             sys.path.insert(0, candidate)
     from config import env_bool, env_float, env_int, load_runtime_config
-    from control import Bld305sMotorBus, MotorStatus, RUN_FORWARD, RUN_REVERSE
+    from control import MixedMotorBus, MotorStatus, RUN_FORWARD, RUN_REVERSE
 else:
     from .config import env_bool, env_float, env_int, load_runtime_config
-    from .control import Bld305sMotorBus, MotorStatus, RUN_FORWARD, RUN_REVERSE
+    from .control import MixedMotorBus, MotorStatus, RUN_FORWARD, RUN_REVERSE
 
 LOG = logging.getLogger("motor_manual")
 
@@ -41,6 +41,8 @@ class MotionInterrupted(RuntimeError):
 class ManualAxisState:
     axis_name: str
     motor_id: int
+    driver_model: str
+    pole_pairs: int
     driver_sign: int
     units_per_raw_speed_s: float
     estimated_position: float
@@ -118,11 +120,17 @@ class ManualMotorSession:
     def __init__(self, axis: ManualAxisState, settings: ManualSettings, *, live: bool, port: str, baudrate: int, timeout_s: float) -> None:
         self.axis = axis
         self.settings = settings
-        self.motor_bus = Bld305sMotorBus(
+        self.motor_bus = MixedMotorBus(
             port=port,
             baudrate=baudrate,
             timeout_s=timeout_s,
             live=live,
+            pan_motor_id=axis.motor_id if axis.axis_name == "pan" else None,
+            truck_motor_id=axis.motor_id if axis.axis_name == "truck" else None,
+            pan_driver_model=axis.driver_model,
+            truck_driver_model=axis.driver_model,
+            pan_pole_pairs=axis.pole_pairs,
+            truck_pole_pairs=axis.pole_pairs,
         )
         self.live = live
         self._runtime_command_buffer = ""
@@ -758,6 +766,8 @@ def build_axis_state(axis_name: str) -> ManualAxisState:
         return ManualAxisState(
             axis_name="truck",
             motor_id=config.motor.truck_motor_id,
+            driver_model=config.motor.truck_driver_model,
+            pole_pairs=config.motor.truck_pole_pairs,
             driver_sign=config.motor.truck_sign,
             units_per_raw_speed_s=env_float(
                 "MOTOR_MANUAL_TRUCK_M_PER_RAW_SPEED_S",
@@ -772,6 +782,8 @@ def build_axis_state(axis_name: str) -> ManualAxisState:
         return ManualAxisState(
             axis_name="pan",
             motor_id=config.motor.pan_motor_id,
+            driver_model=config.motor.pan_driver_model,
+            pole_pairs=config.motor.pan_pole_pairs,
             driver_sign=config.motor.pan_sign,
             units_per_raw_speed_s=env_float(
                 "MOTOR_MANUAL_PAN_DEG_PER_RAW_SPEED_S",

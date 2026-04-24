@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from .config import load_runtime_config
-from .control import Bld305sMotorBus
+from .control import MixedMotorBus
 
 
 @dataclass(frozen=True)
@@ -97,16 +97,26 @@ def main(argv: Optional[list[str]] = None) -> int:
     config = load_runtime_config()
     motor_id = config.motor.truck_motor_id if args.axis == "truck" else config.motor.pan_motor_id
 
-    bus = Bld305sMotorBus(
+    bus = MixedMotorBus(
         port=config.motor.port,
         baudrate=config.motor.baudrate,
         timeout_s=config.motor.timeout_s,
         live=config.motor.enable_live,
+        pan_motor_id=config.motor.pan_motor_id,
+        truck_motor_id=config.motor.truck_motor_id,
+        pan_driver_model=config.motor.pan_driver_model,
+        truck_driver_model=config.motor.truck_driver_model,
+        pan_pole_pairs=config.motor.pan_pole_pairs,
+        truck_pole_pairs=config.motor.truck_pole_pairs,
     )
 
     try:
         bus.connect()
-        current_raw = bus.read_accel_decel_raw(motor_id)
+        try:
+            current_raw = bus.read_accel_decel_raw(motor_id)
+        except RuntimeError as exc:
+            print(str(exc), flush=True)
+            return 2
         current_times = _decode_ramp_times(current_raw)
         print(_format_ramp("current", current_raw, current_times), flush=True)
 

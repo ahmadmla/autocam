@@ -18,7 +18,7 @@ except ImportError:  # pragma: no cover
     mqtt = None
 
 from .config import RuntimeConfig, load_runtime_config
-from .control import Bld305sMotorBus, MotorStatus, RUN_FORWARD, RUN_REVERSE
+from .control import MixedMotorBus, MotorStatus, RUN_FORWARD, RUN_REVERSE
 from .geometry import (
     CameraPoseEstimator,
     ProjectedPoint,
@@ -73,11 +73,17 @@ class MotorControllerApp:
         if not (config.motor.pan_enabled or config.motor.truck_enabled):
             raise RuntimeError("At least one motor axis must be enabled.")
         self.pose_estimator = CameraPoseEstimator(config.camera_pose, config.motor)
-        self.motor_bus = Bld305sMotorBus(
+        self.motor_bus = MixedMotorBus(
             port=config.motor.port,
             baudrate=config.motor.baudrate,
             timeout_s=config.motor.timeout_s,
             live=config.motor.enable_live,
+            pan_motor_id=config.motor.pan_motor_id,
+            truck_motor_id=config.motor.truck_motor_id,
+            pan_driver_model=config.motor.pan_driver_model,
+            truck_driver_model=config.motor.truck_driver_model,
+            pan_pole_pairs=config.motor.pan_pole_pairs,
+            truck_pole_pairs=config.motor.truck_pole_pairs,
         )
         self.poses: Dict[str, FilteredPoseMessage] = {}
         self.selected_node = config.mqtt.target_node
@@ -808,7 +814,7 @@ def main() -> None:
     config = load_runtime_config()
     LOG.warning(
         "motor_controller=start live=%s debug=%s selected=%s camera=%s %sx%s pan_enabled=%s truck_enabled=%s "
-        "pan_motor=%s truck_motor=%s rail_origin=(%.3f,%.3f) rail_heading_deg=%.2f start_rail_m=%.3f "
+        "pan_motor=%s pan_driver=%s truck_motor=%s truck_driver=%s rail_origin=(%.3f,%.3f) rail_heading_deg=%.2f start_rail_m=%.3f "
         "rail_limits=(%.3f,%.3f) rail_soft_margin=%.3f control_hz=%.1f status_poll_s=%.3f log_interval_s=%.3f",
         int(config.motor.enable_live),
         int(config.motor.debug),
@@ -819,7 +825,9 @@ def main() -> None:
         int(config.motor.pan_enabled),
         int(config.motor.truck_enabled),
         config.motor.pan_motor_id,
+        config.motor.pan_driver_model,
         config.motor.truck_motor_id,
+        config.motor.truck_driver_model,
         config.camera_pose.rail_origin_x_m,
         config.camera_pose.rail_origin_y_m,
         config.camera_pose.rail_heading_deg,

@@ -93,6 +93,10 @@ class MotorRuntimeConfig:
     truck_enabled: bool
     pan_motor_id: int
     truck_motor_id: int
+    pan_driver_model: str
+    truck_driver_model: str
+    pan_pole_pairs: int
+    truck_pole_pairs: int
     pan_sign: int
     truck_sign: int
     pan_deg_per_raw_speed_s: float
@@ -235,12 +239,16 @@ def load_runtime_config() -> RuntimeConfig:
         truck_enabled=env_bool("TRUCK_ENABLED", True),
         pan_motor_id=env_int("PAN_MOTOR_ID", 1),
         truck_motor_id=env_int("TRUCK_MOTOR_ID", 2),
+        pan_driver_model=env_str("PAN_DRIVER_MODEL", "BLD510B"),
+        truck_driver_model=env_str("TRUCK_DRIVER_MODEL", "BLD305S"),
+        pan_pole_pairs=env_int("PAN_POLE_PAIRS", 2),
+        truck_pole_pairs=env_int("TRUCK_POLE_PAIRS", 5),
         pan_sign=_signed_env_int("PAN_SIGN", 1),
         truck_sign=_signed_env_int("TRUCK_SIGN", 1),
         pan_deg_per_raw_speed_s=env_float("PAN_DEG_PER_RAW_SPEED_S", 0.01),
         truck_m_per_raw_speed_s=env_float("TRUCK_M_PER_RAW_SPEED_S", 0.00005),
         ramp_raw_per_s=env_float("MOTOR_RAMP_RAW_PER_S", 200.0),
-        pan_max_raw_speed=env_int("PAN_MAX_RAW_SPEED", 100),
+        pan_max_raw_speed=env_int("PAN_MAX_RAW_SPEED", 30),
         truck_max_raw_speed=env_int("TRUCK_MAX_RAW_SPEED", 60),
         pan_min_deg=env_float("PAN_MIN_DEG", -70.0),
         pan_max_deg=env_float("PAN_MAX_DEG", 70.0),
