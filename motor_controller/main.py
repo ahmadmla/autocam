@@ -584,6 +584,9 @@ class MotorControllerApp:
                 self.motor_bus.set_speed(self.config.motor.pan_motor_id, pan_driver)
                 if pan_driver != 0:
                     if pan_sign != prev_pan_sign:
+                        if prev_pan_sign != 0:
+                            self.motor_bus.stop(self.config.motor.pan_motor_id)
+                            self.motor_bus.set_speed(self.config.motor.pan_motor_id, pan_driver)
                         self.motor_bus.run(self.config.motor.pan_motor_id, direction=pan_sign)
                 else:
                     if prev_pan_sign != 0:
@@ -594,6 +597,9 @@ class MotorControllerApp:
                 self.motor_bus.set_speed(self.config.motor.truck_motor_id, truck_driver)
                 if truck_driver != 0:
                     if truck_sign != prev_truck_sign:
+                        if prev_truck_sign != 0:
+                            self.motor_bus.stop(self.config.motor.truck_motor_id)
+                            self.motor_bus.set_speed(self.config.motor.truck_motor_id, truck_driver)
                         self.motor_bus.run(self.config.motor.truck_motor_id, direction=truck_sign)
                 else:
                     if prev_truck_sign != 0:
