@@ -102,6 +102,8 @@ class MotorRuntimeConfig:
     pan_deg_per_raw_speed_s: float
     truck_m_per_raw_speed_s: float
     ramp_raw_per_s: float
+    pan_ramp_raw_per_s: float
+    truck_ramp_raw_per_s: float
     pan_max_raw_speed: int
     truck_max_raw_speed: int
     pan_min_deg: float
@@ -128,6 +130,10 @@ class ControlRuntimeConfig:
     truck_enable_after_pan_centered_ms: float
     pan_kp_raw_per_px: float
     truck_kp_raw_per_px: float
+    pan_error_filter_alpha: float
+    pan_error_filter_tau_s: float
+    pan_direction_flip_hold_ms: float
+    pan_center_hold_ms: float
     truck_error_filter_alpha: float
     truck_error_filter_tau_s: float
     pan_preferred_yaw_min_deg: float
@@ -229,6 +235,7 @@ def load_runtime_config() -> RuntimeConfig:
     )
     legacy_truck_min_x_m = env_float("TRUCK_MIN_X_M", -1.0)
     legacy_truck_max_x_m = env_float("TRUCK_MAX_X_M", 1.0)
+    ramp_raw_per_s = env_float("MOTOR_RAMP_RAW_PER_S", 200.0)
     motor = MotorRuntimeConfig(
         enable_live=env_bool("MOTOR_ENABLE_LIVE", False),
         debug=env_bool("MOTOR_DEBUG", False),
@@ -247,7 +254,9 @@ def load_runtime_config() -> RuntimeConfig:
         truck_sign=_signed_env_int("TRUCK_SIGN", 1),
         pan_deg_per_raw_speed_s=env_float("PAN_DEG_PER_RAW_SPEED_S", 0.01),
         truck_m_per_raw_speed_s=env_float("TRUCK_M_PER_RAW_SPEED_S", 0.00005),
-        ramp_raw_per_s=env_float("MOTOR_RAMP_RAW_PER_S", 200.0),
+        ramp_raw_per_s=ramp_raw_per_s,
+        pan_ramp_raw_per_s=env_float("PAN_RAMP_RAW_PER_S", ramp_raw_per_s),
+        truck_ramp_raw_per_s=env_float("TRUCK_RAMP_RAW_PER_S", ramp_raw_per_s),
         pan_max_raw_speed=env_int("PAN_MAX_RAW_SPEED", 30),
         truck_max_raw_speed=env_int("TRUCK_MAX_RAW_SPEED", 60),
         pan_min_deg=env_float("PAN_MIN_DEG", -70.0),
@@ -284,6 +293,10 @@ def load_runtime_config() -> RuntimeConfig:
         truck_enable_after_pan_centered_ms=env_float("TRUCK_ENABLE_AFTER_PAN_CENTERED_MS", 500.0),
         pan_kp_raw_per_px=env_float("PAN_KP_RAW_PER_PX", 0.45),
         truck_kp_raw_per_px=env_float("TRUCK_KP_RAW_PER_PX", 0.08),
+        pan_error_filter_alpha=env_float("PAN_ERROR_FILTER_ALPHA", 1.0),
+        pan_error_filter_tau_s=env_float("PAN_ERROR_FILTER_TAU_S", 0.0),
+        pan_direction_flip_hold_ms=env_float("PAN_DIRECTION_FLIP_HOLD_MS", 0.0),
+        pan_center_hold_ms=env_float("PAN_CENTER_HOLD_MS", 0.0),
         truck_error_filter_alpha=env_float("TRUCK_ERROR_FILTER_ALPHA", 0.05),
         truck_error_filter_tau_s=env_float("TRUCK_ERROR_FILTER_TAU_S", 0.15),
         pan_preferred_yaw_min_deg=env_float("PAN_PREFERRED_YAW_MIN_DEG", -25.0),

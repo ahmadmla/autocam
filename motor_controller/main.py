@@ -95,6 +95,11 @@ class MotorControllerApp:
         self.last_pose_poll_monotonic: Optional[float] = None
         self.last_log_monotonic = 0.0
         self.centered_since_monotonic: Optional[float] = None
+        self.pan_error_filtered: Optional[float] = None
+        self.pan_last_direction = 0
+        self.pan_flip_pending_direction = 0
+        self.pan_flip_pending_since_monotonic: Optional[float] = None
+        self.pan_center_hold_until_monotonic: Optional[float] = None
         self.truck_error_filtered = 0.0
         self.logical_pan_command = 0
         self.logical_truck_command = 0
@@ -143,6 +148,7 @@ class MotorControllerApp:
         pose = self.pose_estimator.reset_to_start()
         self.armed = True
         self.centered_since_monotonic = None
+        self._reset_pan_control_state()
         self.truck_error_filtered = 0.0
         LOG.warning(
             "motor_state=armed pose_estimate=rail=%.3f x=%.3f y=%.3f pan=%.2f live=%s",
@@ -158,6 +164,7 @@ class MotorControllerApp:
             LOG.warning("motor_state=disarmed reason=%s", reason)
         self.armed = False
         self.pose_estimator.invalidate()
+        self._reset_pan_control_state()
         self.stop_motors()
 
     def maybe_prompt_arm(self) -> None:
@@ -246,6 +253,7 @@ class MotorControllerApp:
             return
         self.selected_node = node_id
         self.centered_since_monotonic = None
+        self._reset_pan_control_state()
         LOG.warning("target_select node=%s", node_id)
 
     def handle_vision_correction(self, payload: dict) -> None:
@@ -318,6 +326,77 @@ class MotorControllerApp:
     def _ramp(self, current: int, target: int, dt_s: float) -> int:
         step = max(self.config.motor.ramp_raw_per_s * max(dt_s, 0.0), 1.0)
         return int(round(clamp(float(target), current - step, current + step)))
+
+    def _ramp_axis(self, axis_name: str, current: int, target: int, dt_s: float) -> int:
+        if axis_name == "pan":
+            ramp_raw_per_s = self.config.motor.pan_ramp_raw_per_s
+        elif axis_name == "truck":
+            ramp_raw_per_s = self.config.motor.truck_ramp_raw_per_s
+        else:
+            ramp_raw_per_s = self.config.motor.ramp_raw_per_s
+        step = max(float(ramp_raw_per_s) * max(dt_s, 0.0), 1.0)
+        return int(round(clamp(float(target), current - step, current + step)))
+
+    @staticmethod
+    def _sign(value: int | float) -> int:
+        if value > 0:
+            return 1
+        if value < 0:
+            return -1
+        return 0
+
+    def _reset_pan_control_state(self) -> None:
+        self.pan_error_filtered = None
+        self.pan_last_direction = 0
+        self.pan_flip_pending_direction = 0
+        self.pan_flip_pending_since_monotonic = None
+        self.pan_center_hold_until_monotonic = None
+
+    def _filter_pan_error(self, error_x_px: float, dt_s: float) -> float:
+        if self.pan_error_filtered is None or not math.isfinite(self.pan_error_filtered):
+            self.pan_error_filtered = error_x_px
+            return self.pan_error_filtered
+
+        tau_s = max(0.0, self.config.control.pan_error_filter_tau_s)
+        if tau_s > 0.0:
+            alpha = 1.0 - math.exp(-max(0.0, dt_s) / tau_s)
+        else:
+            alpha = clamp(self.config.control.pan_error_filter_alpha, 0.0, 1.0)
+        self.pan_error_filtered = (1.0 - alpha) * self.pan_error_filtered + alpha * error_x_px
+        return self.pan_error_filtered
+
+    def _apply_pan_direction_hysteresis(self, desired_pan_raw: int, now: float) -> Tuple[int, str]:
+        desired_direction = self._sign(desired_pan_raw)
+        active_direction = self._sign(self.logical_pan_command) or self.pan_last_direction
+
+        if desired_direction == 0:
+            self.pan_flip_pending_direction = 0
+            self.pan_flip_pending_since_monotonic = None
+            center_hold_s = max(0.0, self.config.control.pan_center_hold_ms) / 1000.0
+            if center_hold_s > 0.0:
+                self.pan_center_hold_until_monotonic = now + center_hold_s
+            return 0, ""
+
+        if (
+            self.pan_center_hold_until_monotonic is not None
+            and now < self.pan_center_hold_until_monotonic
+        ):
+            return 0, "_PAN_CENTER_HOLD"
+        self.pan_center_hold_until_monotonic = None
+
+        flip_hold_s = max(0.0, self.config.control.pan_direction_flip_hold_ms) / 1000.0
+        if active_direction and desired_direction != active_direction and flip_hold_s > 0.0:
+            if self.pan_flip_pending_direction != desired_direction:
+                self.pan_flip_pending_direction = desired_direction
+                self.pan_flip_pending_since_monotonic = now
+            elapsed_s = now - (self.pan_flip_pending_since_monotonic or now)
+            if elapsed_s < flip_hold_s:
+                return 0, "_PAN_FLIP_HOLD"
+
+        self.pan_flip_pending_direction = 0
+        self.pan_flip_pending_since_monotonic = None
+        self.pan_last_direction = desired_direction
+        return desired_pan_raw, ""
 
     def _driver_commands(self, logical_pan: int, logical_truck: int) -> Tuple[int, int]:
         return (
@@ -440,6 +519,10 @@ class MotorControllerApp:
             and margin <= projected.y_px <= self.config.camera.image_h - margin
         )
 
+    def _safe_horizontal_envelope(self, projected: ProjectedPoint) -> bool:
+        margin = self.config.control.safe_image_margin_px
+        return margin <= projected.x_px <= self.config.camera.image_w - margin
+
     def build_command(self, target: FilteredPoseMessage, now: float, dt_s: float) -> AxisCommand:
         camera_pose = self.pose_estimator.pose
         projected = project_floor_point(
@@ -450,24 +533,26 @@ class MotorControllerApp:
         projected, source = self.apply_vision_correction(target.node_id, projected, now)
         target_x, _target_y = self.target_image_center()
         error_x = projected.x_px - target_x
-        safe_envelope = self._safe_envelope(projected)
+        filtered_error_x = self._filter_pan_error(error_x, dt_s)
+        safe_horizontal_envelope = self._safe_horizontal_envelope(projected)
 
         pan_enabled = self.config.motor.pan_enabled
         truck_enabled = self.config.motor.truck_enabled
 
-        centered = abs(error_x) <= self.config.control.pan_centered_threshold_px
+        centered = abs(filtered_error_x) <= self.config.control.pan_centered_threshold_px
         if centered:
             if self.centered_since_monotonic is None:
                 self.centered_since_monotonic = now
         else:
             self.centered_since_monotonic = None
 
-        pan_raw_f = self._deadband(error_x, self.config.control.pan_image_deadband_px)
+        pan_raw_f = self._deadband(filtered_error_x, self.config.control.pan_image_deadband_px)
         pan_raw = int(round(clamp(
             pan_raw_f * self.config.control.pan_kp_raw_per_px,
             -self.config.motor.pan_max_raw_speed,
             self.config.motor.pan_max_raw_speed,
         )))
+        pan_raw, pan_hold_mode = self._apply_pan_direction_hysteresis(pan_raw, now)
 
         tau_s = max(0.0, self.config.control.truck_error_filter_tau_s)
         if tau_s > 0.0:
@@ -502,7 +587,7 @@ class MotorControllerApp:
                 truck_raw = 0
                 mode += "_TRUCK_SOFT_LIMIT"
             if not truck_blocked:
-                truck_raw = self._ramp(self.logical_truck_command, truck_raw, dt_s)
+                truck_raw = self._ramp_axis("truck", self.logical_truck_command, truck_raw, dt_s)
             return AxisCommand(
                 pan_raw=0,
                 truck_raw=truck_raw,
@@ -513,14 +598,14 @@ class MotorControllerApp:
             )
 
         if pan_enabled and not truck_enabled:
-            mode = "PAN_ONLY_TRACK"
+            mode = "PAN_ONLY_TRACK" + pan_hold_mode
             truck_raw = 0
             pan_blocked = self.pose_estimator.blocks_pan(pan_raw)
             if pan_blocked:
                 pan_raw = 0
                 mode += "_PAN_SOFT_LIMIT"
             if not pan_blocked:
-                pan_raw = self._ramp(self.logical_pan_command, pan_raw, dt_s)
+                pan_raw = self._ramp_axis("pan", self.logical_pan_command, pan_raw, dt_s)
             return AxisCommand(
                 pan_raw=pan_raw,
                 truck_raw=0,
@@ -541,10 +626,10 @@ class MotorControllerApp:
             and (now - self.centered_since_monotonic) >= centered_delay_s
         )
 
-        if not safe_envelope:
+        if not safe_horizontal_envelope:
             mode = "PAN_PRIORITY_SAFE_ENVELOPE"
             truck_raw = 0
-        elif abs(error_x) > self.config.control.pan_prealign_threshold_px:
+        elif abs(filtered_error_x) > self.config.control.pan_prealign_threshold_px:
             mode = "PAN_PREALIGN_TRUCK_SUPPRESSED"
             truck_raw = 0
         elif centered_long_enough or pan_outside_preferred:
@@ -554,6 +639,7 @@ class MotorControllerApp:
             truck_raw = 0
 
         pan_blocked = self.pose_estimator.blocks_pan(pan_raw)
+        mode += pan_hold_mode
         if pan_blocked:
             pan_raw = 0
             mode += "_PAN_SOFT_LIMIT"
@@ -563,9 +649,9 @@ class MotorControllerApp:
             mode += "_TRUCK_SOFT_LIMIT"
 
         if not pan_blocked:
-            pan_raw = self._ramp(self.logical_pan_command, pan_raw, dt_s)
+            pan_raw = self._ramp_axis("pan", self.logical_pan_command, pan_raw, dt_s)
         if not truck_blocked:
-            truck_raw = self._ramp(self.logical_truck_command, truck_raw, dt_s)
+            truck_raw = self._ramp_axis("truck", self.logical_truck_command, truck_raw, dt_s)
         return AxisCommand(
             pan_raw=pan_raw,
             truck_raw=truck_raw,
@@ -821,7 +907,8 @@ def main() -> None:
     LOG.warning(
         "motor_controller=start live=%s debug=%s selected=%s camera=%s %sx%s pan_enabled=%s truck_enabled=%s "
         "pan_motor=%s pan_driver=%s truck_motor=%s truck_driver=%s rail_origin=(%.3f,%.3f) rail_heading_deg=%.2f start_rail_m=%.3f "
-        "rail_limits=(%.3f,%.3f) rail_soft_margin=%.3f control_hz=%.1f status_poll_s=%.3f log_interval_s=%.3f",
+        "rail_limits=(%.3f,%.3f) rail_soft_margin=%.3f control_hz=%.1f status_poll_s=%.3f log_interval_s=%.3f "
+        "pan_max=%s pan_deadband=%.1f pan_kp=%.3f pan_ramp=%.1f pan_filter_tau=%.3f pan_flip_hold_ms=%.0f pan_center_hold_ms=%.0f",
         int(config.motor.enable_live),
         int(config.motor.debug),
         config.mqtt.target_node,
@@ -844,6 +931,13 @@ def main() -> None:
         config.control.control_hz,
         config.control.status_poll_s,
         config.control.log_interval_s,
+        config.motor.pan_max_raw_speed,
+        config.control.pan_image_deadband_px,
+        config.control.pan_kp_raw_per_px,
+        config.motor.pan_ramp_raw_per_s,
+        config.control.pan_error_filter_tau_s,
+        config.control.pan_direction_flip_hold_ms,
+        config.control.pan_center_hold_ms,
     )
     app = MotorControllerApp(config)
 
