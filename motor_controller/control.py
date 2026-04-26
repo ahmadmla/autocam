@@ -267,7 +267,8 @@ class Bld510bProtocol:
 
     def read_status(self, motor_id: int) -> MotorStatus:
         actual_speed = self.bus.read_reg(motor_id, REG_510_ACTUAL_SPEED)[0]
-        fault_code = self.bus.read_reg(motor_id, REG_510_FAULT)[0]
+        fault_raw = self.bus.read_reg(motor_id, REG_510_FAULT)[0]
+        fault_code = (fault_raw >> 8) & 0xFF
         return MotorStatus(
             motor_id=motor_id,
             actual_speed_raw=decode_signed_16(actual_speed),
