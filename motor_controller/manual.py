@@ -816,7 +816,7 @@ def build_axis_state(axis_name: str) -> ManualAxisState:
     raise ValueError(f"Unsupported axis: {axis_name}")
 
 
-def load_manual_settings(default_speed: int) -> ManualSettings:
+def load_manual_settings(default_speed: int, *, axis_name: str) -> ManualSettings:
     max_raw_speed = max(1, env_int("MOTOR_MANUAL_MAX_RAW_SPEED", 20))
     requested_speed = abs(env_int("MOTOR_MANUAL_JOG_RAW_SPEED", default_speed))
     jog_raw_speed = min(max_raw_speed, max(1, requested_speed))
@@ -833,6 +833,13 @@ def load_manual_settings(default_speed: int) -> ManualSettings:
     requested_duration = env_float("MOTOR_MANUAL_JOG_DURATION_S", 0.10)
     jog_duration_s = min(max_duration_s, max(0.02, requested_duration))
     goto_max_duration_s = min(max_duration_s, max(0.02, env_float("MOTOR_MANUAL_GOTO_MAX_DURATION_S", min(jog_duration_s, 0.10))))
+    shared_goto_tolerance = env_float("MOTOR_MANUAL_GOTO_TOLERANCE", 0.01)
+    if axis_name == "pan":
+        goto_tolerance = env_float("MOTOR_MANUAL_PAN_GOTO_TOLERANCE", shared_goto_tolerance)
+    elif axis_name == "truck":
+        goto_tolerance = env_float("MOTOR_MANUAL_TRUCK_GOTO_TOLERANCE", shared_goto_tolerance)
+    else:
+        goto_tolerance = shared_goto_tolerance
     return ManualSettings(
         jog_raw_speed=jog_raw_speed,
         jog_duration_s=jog_duration_s,
@@ -843,7 +850,7 @@ def load_manual_settings(default_speed: int) -> ManualSettings:
         status_poll_s=max(0.01, env_float("MOTOR_MANUAL_STATUS_POLL_S", 0.02)),
         print_poll_samples=env_bool("MOTOR_MANUAL_PRINT_POLL_SAMPLES", False),
         goto_max_duration_s=goto_max_duration_s,
-        goto_tolerance=max(0.0, env_float("MOTOR_MANUAL_GOTO_TOLERANCE", 0.01)),
+        goto_tolerance=max(0.0, goto_tolerance),
         goto_max_steps=max(1, env_int("MOTOR_MANUAL_GOTO_MAX_STEPS", 50)),
         limit_margin=max(0.0, env_float("MOTOR_MANUAL_LIMIT_MARGIN_M", 0.05)),
         goto_speed_factor=max(0.1, env_float("MOTOR_MANUAL_GOTO_SPEED_FACTOR", 1.5)),
@@ -934,7 +941,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     config = load_runtime_config()
     axis = build_axis_state(args.axis)
     default_speed = config.motor.truck_max_raw_speed if args.axis == "truck" else config.motor.pan_max_raw_speed
-    settings = load_manual_settings(default_speed=min(default_speed, 10))
+    settings = load_manual_settings(default_speed=min(default_speed, 10), axis_name=args.axis)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     session = ManualMotorSession(
