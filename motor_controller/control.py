@@ -271,7 +271,7 @@ class Bld510bProtocol:
         fault_code = (fault_raw >> 8) & 0xFF
         return MotorStatus(
             motor_id=motor_id,
-            actual_speed_raw=decode_signed_16(actual_speed),
+            actual_speed_raw=decode_signed_16(self._swap16(actual_speed)),
             run_status=None,
             fault_code=fault_code,
         )
