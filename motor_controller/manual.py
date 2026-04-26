@@ -236,6 +236,7 @@ class ManualMotorSession:
         last_t = time.monotonic()
         delta = 0.0
         sample_index = 0
+        nonzero_samples = 0
         while True:
             now = time.monotonic()
             remaining = end_t - now
@@ -252,6 +253,8 @@ class ManualMotorSession:
                 requested_logical_direction,
             )
             actual_raw = abs(int(status.actual_speed_raw or 0))
+            if actual_raw > 0:
+                nonzero_samples += 1
             sample_delta = (
                 actual_logical_direction
                 * actual_raw
@@ -290,6 +293,22 @@ class ManualMotorSession:
                     f"estimated_{self.axis.unit_name}={self.axis.estimated_position:.5f}",
                     flush=True,
                 )
+        if nonzero_samples == 0 and duration_s > 0.0:
+            # Some drivers update actual-speed telemetry too slowly for very
+            # short manual jogs. Fall back to the commanded pulse so the
+            # calibration estimate still tracks visible motion.
+            logical_raw = int(requested_logical_direction) * self.settings.jog_raw_speed
+            fallback_delta = logical_raw * self.axis.units_per_raw_speed_s * duration_s
+            remaining_travel = None
+            if enforce_limits:
+                remaining_travel = self.axis.remaining_travel(
+                    int(logical_sign),
+                    self.settings.limit_margin,
+                )
+            if remaining_travel is not None:
+                fallback_delta = logical_sign * min(abs(fallback_delta), max(0.0, remaining_travel))
+            self.axis.estimated_position += fallback_delta
+            return fallback_delta
         return delta
 
     def _confirm_pulse_limit_override(
