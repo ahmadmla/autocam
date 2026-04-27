@@ -352,6 +352,10 @@ class MotorControllerApp:
         self.pan_flip_pending_since_monotonic = None
         self.pan_center_hold_until_monotonic = None
 
+    def _reset_tracking_error_state(self) -> None:
+        self._reset_pan_control_state()
+        self.truck_error_filtered = 0.0
+
     def _filter_pan_error(self, error_x_px: float, dt_s: float) -> float:
         if self.pan_error_filtered is None or not math.isfinite(self.pan_error_filtered):
             self.pan_error_filtered = error_x_px
@@ -533,6 +537,24 @@ class MotorControllerApp:
         projected, source = self.apply_vision_correction(target.node_id, projected, now)
         target_x, _target_y = self.target_image_center()
         error_x = projected.x_px - target_x
+
+        stationary_hold_active = (
+            self.config.control.stationary_hold_enabled
+            and target.stationary_locked
+            and target.quality_score >= self.config.control.stationary_hold_min_quality
+            and abs(error_x) <= self.config.control.stationary_hold_pan_window_px
+        )
+        if stationary_hold_active and self.config.control.stationary_hold_disable_truck:
+            self._reset_tracking_error_state()
+            return AxisCommand(
+                pan_raw=0,
+                truck_raw=0,
+                mode="STATIONARY_HOLD",
+                projected=projected,
+                error_x_px=error_x,
+                source=source,
+            )
+
         filtered_error_x = self._filter_pan_error(error_x, dt_s)
         safe_horizontal_envelope = self._safe_horizontal_envelope(projected)
 
@@ -553,6 +575,10 @@ class MotorControllerApp:
             self.config.motor.pan_max_raw_speed,
         )))
         pan_raw, pan_hold_mode = self._apply_pan_direction_hysteresis(pan_raw, now)
+        if stationary_hold_active:
+            self._reset_pan_control_state()
+            pan_raw = 0
+            pan_hold_mode = "_STATIONARY_HOLD"
 
         tau_s = max(0.0, self.config.control.truck_error_filter_tau_s)
         if tau_s > 0.0:
@@ -737,7 +763,7 @@ class MotorControllerApp:
             LOG.info(
                 "tick armed=%s selected=%s q=%.2f filt=(%.3f,%.3f) pose_est=(rail=%.3f,x=%.3f,y=%.3f,pan=%.2f) "
                 "truck_limits_loaded=(%.3f,%.3f) truck_limits_active=(%.3f,%.3f) actual_logical=(%.1f,%.1f) "
-                "px=(%.1f,%.1f) err_x=%.1f mode=%s source=%s cmd_logical=(%s,%s) cmd_driver=(%s,%s)",
+                "px=(%.1f,%.1f) err_x=%.1f stationary_locked=%s mode=%s source=%s cmd_logical=(%s,%s) cmd_driver=(%s,%s)",
                 int(self.armed),
                 target.node_id,
                 target.quality_score,
@@ -756,6 +782,7 @@ class MotorControllerApp:
                 command.projected.x_px,
                 command.projected.y_px,
                 command.error_x_px or 0.0,
+                int(target.stationary_locked),
                 command.mode,
                 command.source,
                 command.pan_raw,
@@ -767,7 +794,7 @@ class MotorControllerApp:
             active_truck_min, active_truck_max = self.pose_estimator.active_truck_limits()
             LOG.info(
                 "tick armed=%s selected=%s q=%.2f filt=(%.3f,%.3f) rail=%.3f limits=(%.3f,%.3f) pan=%.2f "
-                "px=(%.1f,%.1f) err_x=%.1f mode=%s source=%s cmd_logical=(%s,%s) cmd_driver=(%s,%s)",
+                "px=(%.1f,%.1f) err_x=%.1f stationary_locked=%s mode=%s source=%s cmd_logical=(%s,%s) cmd_driver=(%s,%s)",
                 int(self.armed),
                 target.node_id,
                 target.quality_score,
@@ -780,6 +807,7 @@ class MotorControllerApp:
                 command.projected.x_px,
                 command.projected.y_px,
                 command.error_x_px or 0.0,
+                int(target.stationary_locked),
                 command.mode,
                 command.source,
                 command.pan_raw,
@@ -908,7 +936,8 @@ def main() -> None:
         "motor_controller=start live=%s debug=%s selected=%s camera=%s %sx%s pan_enabled=%s truck_enabled=%s "
         "pan_motor=%s pan_driver=%s truck_motor=%s truck_driver=%s rail_origin=(%.3f,%.3f) rail_heading_deg=%.2f start_rail_m=%.3f "
         "rail_limits=(%.3f,%.3f) rail_soft_margin=%.3f control_hz=%.1f status_poll_s=%.3f log_interval_s=%.3f "
-        "pan_max=%s pan_deadband=%.1f pan_kp=%.3f pan_ramp=%.1f pan_filter_tau=%.3f pan_flip_hold_ms=%.0f pan_center_hold_ms=%.0f",
+        "pan_max=%s pan_deadband=%.1f pan_kp=%.3f pan_ramp=%.1f pan_filter_tau=%.3f pan_flip_hold_ms=%.0f pan_center_hold_ms=%.0f "
+        "stationary_hold=%s stationary_hold_min_q=%.2f stationary_hold_window_px=%.1f",
         int(config.motor.enable_live),
         int(config.motor.debug),
         config.mqtt.target_node,
@@ -938,6 +967,9 @@ def main() -> None:
         config.control.pan_error_filter_tau_s,
         config.control.pan_direction_flip_hold_ms,
         config.control.pan_center_hold_ms,
+        int(config.control.stationary_hold_enabled),
+        config.control.stationary_hold_min_quality,
+        config.control.stationary_hold_pan_window_px,
     )
     app = MotorControllerApp(config)
 

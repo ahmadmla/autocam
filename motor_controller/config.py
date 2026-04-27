@@ -141,6 +141,10 @@ class ControlRuntimeConfig:
     safe_image_margin_px: float
     target_image_x_px: Optional[float]
     target_image_y_px: Optional[float]
+    stationary_hold_enabled: bool
+    stationary_hold_min_quality: float
+    stationary_hold_pan_window_px: float
+    stationary_hold_disable_truck: bool
     vision_correction_stale_s: float
     vision_correction_min_confidence: float
     vision_correction_blend: float
@@ -304,6 +308,10 @@ def load_runtime_config() -> RuntimeConfig:
         safe_image_margin_px=env_float("MOTOR_SAFE_IMAGE_MARGIN_PX", 120.0),
         target_image_x_px=env_optional_float("MOTOR_TARGET_IMAGE_X_PX"),
         target_image_y_px=env_optional_float("MOTOR_TARGET_IMAGE_Y_PX"),
+        stationary_hold_enabled=env_bool("STATIONARY_HOLD_ENABLED", True),
+        stationary_hold_min_quality=env_float("STATIONARY_HOLD_MIN_QUALITY", 0.60),
+        stationary_hold_pan_window_px=env_float("STATIONARY_HOLD_PAN_WINDOW_PX", 500.0),
+        stationary_hold_disable_truck=env_bool("STATIONARY_HOLD_DISABLE_TRUCK", True),
         vision_correction_stale_s=env_float("VISION_CORRECTION_STALE_S", 0.25),
         vision_correction_min_confidence=env_float("VISION_CORRECTION_MIN_CONFIDENCE", 0.60),
         vision_correction_blend=env_float("VISION_CORRECTION_BLEND", 0.0),
