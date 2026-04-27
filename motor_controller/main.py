@@ -410,13 +410,7 @@ class MotorControllerApp:
         return math.hypot(target_x - lock.x_m, target_y - lock.y_m)
 
     def _target_stationary_for_hold(self, target: FilteredPoseMessage) -> bool:
-        if target.stationary_locked:
-            return True
-        confidence = target.stationary_confidence
-        return (
-            confidence is not None
-            and confidence >= self.config.control.stationary_hold_min_stationary_conf
-        )
+        return target.stationary_locked
 
     def _enter_stationary_hold(self, target: FilteredPoseMessage, error_x_px: float, now: float) -> None:
         pose = self.pose_estimator.pose
@@ -719,19 +713,36 @@ class MotorControllerApp:
 
     def build_command(self, target: FilteredPoseMessage, now: float, dt_s: float) -> AxisCommand:
         camera_pose = self.pose_estimator.pose
-        projected = project_floor_point(
-            WorldPoint(target.x_m, target.y_m, 0.0),
-            camera_pose,
-            self.config.camera,
-        )
-        projected, source = self.apply_vision_correction(target.node_id, projected, now)
-        target_x, _target_y = self.target_image_center()
-        error_x = projected.x_px - target_x
+        projected: Optional[ProjectedPoint]
+        error_x: Optional[float]
+        source = "uwb_projection"
+        projection_valid = True
+        desired_bearing_deg = self._desired_bearing_deg(camera_pose, target)
+        pan_error_deg = self._normalize_angle_deg(desired_bearing_deg - camera_pose.pan_deg)
+        try:
+            projected = project_floor_point(
+                WorldPoint(target.x_m, target.y_m, 0.0),
+                camera_pose,
+                self.config.camera,
+            )
+            projected, source = self.apply_vision_correction(target.node_id, projected, now)
+            target_x, _target_y = self.target_image_center()
+            error_x = projected.x_px - target_x
+        except ProjectionError:
+            if self.config.control.pan_control_mode != "BEARING_VELOCITY":
+                raise
+            projected = None
+            error_x = None
+            projection_valid = False
+            source = "bearing_only_projection_invalid"
+            self._clear_stationary_hold("projection_invalid")
 
-        stationary_hold_active = self._stationary_hold_active(target, error_x, now)
+        stationary_hold_active = (
+            projection_valid
+            and error_x is not None
+            and self._stationary_hold_active(target, error_x, now)
+        )
         if stationary_hold_active:
-            desired_bearing_deg = self._desired_bearing_deg(camera_pose, target)
-            pan_error_deg = self._normalize_angle_deg(desired_bearing_deg - camera_pose.pan_deg)
             return AxisCommand(
                 pan_raw=0,
                 truck_raw=0,
@@ -744,17 +755,15 @@ class MotorControllerApp:
                 bearing_rate_deg_s=0.0,
             )
 
-        safe_horizontal_envelope = self._safe_horizontal_envelope(projected)
+        safe_horizontal_envelope = bool(projected is not None and self._safe_horizontal_envelope(projected))
 
         pan_enabled = self.config.motor.pan_enabled
         truck_enabled = self.config.motor.truck_enabled
         pan_already_ramped = False
-        desired_bearing_deg: Optional[float] = None
-        pan_error_deg: Optional[float] = None
         bearing_rate_deg_s: Optional[float] = None
 
         if self.config.control.pan_control_mode == "BEARING_VELOCITY":
-            filtered_error_x = error_x
+            filtered_error_x = error_x or 0.0
             (
                 pan_raw,
                 pan_hold_mode,
@@ -764,6 +773,8 @@ class MotorControllerApp:
             ) = self._bearing_velocity_pan_command(target, camera_pose, now, dt_s)
             pan_already_ramped = True
         else:
+            if error_x is None:
+                raise ProjectionError("Projection unavailable for pixel pan control")
             filtered_error_x = self._filter_pan_error(error_x, dt_s)
             pan_raw_f = self._deadband(filtered_error_x, self.config.control.pan_image_deadband_px)
             pan_raw = int(round(clamp(
@@ -772,6 +783,26 @@ class MotorControllerApp:
                 self.config.motor.pan_max_raw_speed,
             )))
             pan_raw, pan_hold_mode = self._apply_pan_direction_hysteresis(pan_raw, now)
+
+        if not projection_valid:
+            mode = "PAN_BEARING_RECOVERY" + pan_hold_mode
+            if not pan_enabled:
+                pan_raw = 0
+            pan_blocked = self.pose_estimator.blocks_pan(pan_raw)
+            if pan_blocked:
+                pan_raw = 0
+                mode += "_PAN_SOFT_LIMIT"
+            return AxisCommand(
+                pan_raw=pan_raw,
+                truck_raw=0,
+                mode=mode,
+                projected=None,
+                error_x_px=None,
+                source=source,
+                desired_bearing_deg=desired_bearing_deg,
+                pan_error_deg=pan_error_deg,
+                bearing_rate_deg_s=bearing_rate_deg_s,
+            )
 
         centered = abs(filtered_error_x) <= self.config.control.pan_centered_threshold_px
         if centered:
@@ -936,7 +967,7 @@ class MotorControllerApp:
         self.last_log_monotonic = now
         pose = self.pose_estimator.pose
         debug_enabled = self.config.motor.debug
-        if target is None or command.projected is None:
+        if target is None:
             if debug_enabled:
                 active_truck_min, active_truck_max = self.pose_estimator.active_truck_limits()
                 LOG.info(
@@ -965,6 +996,74 @@ class MotorControllerApp:
                     active_truck_min,
                     active_truck_max,
                     pose.pan_deg,
+                )
+            return
+        if command.projected is None:
+            active_truck_min, active_truck_max = self.pose_estimator.active_truck_limits()
+            stationary_confidence_log = (
+                target.stationary_confidence if target.stationary_confidence is not None else -1.0
+            )
+            desired_bearing_log = command.desired_bearing_deg if command.desired_bearing_deg is not None else -999.0
+            pan_error_deg_log = command.pan_error_deg if command.pan_error_deg is not None else -999.0
+            bearing_rate_log = command.bearing_rate_deg_s if command.bearing_rate_deg_s is not None else 0.0
+            if debug_enabled:
+                LOG.info(
+                    "tick armed=%s selected=%s q=%.2f stat=%.2f filt=(%.3f,%.3f) pose_est=(rail=%.3f,x=%.3f,y=%.3f,pan=%.2f) "
+                    "truck_limits_loaded=(%.3f,%.3f) truck_limits_active=(%.3f,%.3f) actual_logical=(%.1f,%.1f) "
+                    "px=invalid bearing=%.2f pan_err_deg=%.2f bearing_rate=%.2f stationary_locked=%s mode=%s source=%s "
+                    "cmd_logical=(%s,%s) cmd_driver=(%s,%s)",
+                    int(self.armed),
+                    target.node_id,
+                    target.quality_score,
+                    stationary_confidence_log,
+                    target.x_m,
+                    target.y_m,
+                    pose.rail_position_m,
+                    pose.x_m,
+                    pose.y_m,
+                    pose.pan_deg,
+                    self.config.motor.truck_min_rail_m,
+                    self.config.motor.truck_max_rail_m,
+                    active_truck_min,
+                    active_truck_max,
+                    self.latest_actual_pan_raw,
+                    self.latest_actual_truck_raw,
+                    desired_bearing_log,
+                    pan_error_deg_log,
+                    bearing_rate_log,
+                    int(target.stationary_locked),
+                    command.mode,
+                    command.source,
+                    command.pan_raw,
+                    command.truck_raw,
+                    self.driver_pan_command,
+                    self.driver_truck_command,
+                )
+            else:
+                LOG.info(
+                    "tick armed=%s selected=%s q=%.2f stat=%.2f filt=(%.3f,%.3f) rail=%.3f limits=(%.3f,%.3f) pan=%.2f "
+                    "px=invalid bearing=%.2f pan_err_deg=%.2f bearing_rate=%.2f stationary_locked=%s mode=%s source=%s "
+                    "cmd_logical=(%s,%s) cmd_driver=(%s,%s)",
+                    int(self.armed),
+                    target.node_id,
+                    target.quality_score,
+                    stationary_confidence_log,
+                    target.x_m,
+                    target.y_m,
+                    pose.rail_position_m,
+                    active_truck_min,
+                    active_truck_max,
+                    pose.pan_deg,
+                    desired_bearing_log,
+                    pan_error_deg_log,
+                    bearing_rate_log,
+                    int(target.stationary_locked),
+                    command.mode,
+                    command.source,
+                    command.pan_raw,
+                    command.truck_raw,
+                    self.driver_pan_command,
+                    self.driver_truck_command,
                 )
             return
         hold_distance_m = self._stationary_hold_distance_m(target)
@@ -1186,7 +1285,7 @@ def main() -> None:
         "pan_mode=%s pan_max=%s pan_deadband=%.1f pan_kp=%.3f pan_bearing_kp=%.3f pan_bearing_kd=%.3f "
         "pan_bearing_deadband=%.2f pan_velocity_filter_tau=%.3f pan_command_ramp=%.1f "
         "pan_ramp=%.1f pan_filter_tau=%.3f pan_flip_hold_ms=%.0f pan_center_hold_ms=%.0f "
-        "stationary_hold=%s stationary_hold_min_q=%.2f stationary_hold_min_stat=%.2f stationary_hold_window_px=%.1f "
+        "stationary_hold=%s stationary_hold_min_q=%.2f stationary_hold_window_px=%.1f "
         "stationary_hold_escape_px=%.1f stationary_hold_room_radius_m=%.3f",
         int(config.motor.enable_live),
         int(config.motor.debug),
@@ -1225,7 +1324,6 @@ def main() -> None:
         config.control.pan_center_hold_ms,
         int(config.control.stationary_hold_enabled),
         config.control.stationary_hold_min_quality,
-        config.control.stationary_hold_min_stationary_conf,
         config.control.stationary_hold_pan_window_px,
         config.control.stationary_hold_escape_window_px,
         config.control.stationary_hold_room_radius_m,

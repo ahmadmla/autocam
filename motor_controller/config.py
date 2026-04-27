@@ -149,7 +149,6 @@ class ControlRuntimeConfig:
     target_image_y_px: Optional[float]
     stationary_hold_enabled: bool
     stationary_hold_min_quality: float
-    stationary_hold_min_stationary_conf: float
     stationary_hold_pan_window_px: float
     stationary_hold_escape_window_px: float
     stationary_hold_room_radius_m: float
@@ -264,7 +263,10 @@ def load_runtime_config() -> RuntimeConfig:
         truck_pole_pairs=env_int("TRUCK_POLE_PAIRS", 5),
         pan_sign=_signed_env_int("PAN_SIGN", 1),
         truck_sign=_signed_env_int("TRUCK_SIGN", 1),
-        pan_deg_per_raw_speed_s=env_float("PAN_DEG_PER_RAW_SPEED_S", 0.01),
+        pan_deg_per_raw_speed_s=env_float(
+            "PAN_DEG_PER_RAW_SPEED_S",
+            env_float("MOTOR_MANUAL_PAN_DEG_PER_RAW_SPEED_S", 0.01),
+        ),
         truck_m_per_raw_speed_s=env_float("TRUCK_M_PER_RAW_SPEED_S", 0.00005),
         ramp_raw_per_s=ramp_raw_per_s,
         pan_ramp_raw_per_s=env_float("PAN_RAMP_RAW_PER_S", ramp_raw_per_s),
@@ -305,11 +307,11 @@ def load_runtime_config() -> RuntimeConfig:
         truck_enable_after_pan_centered_ms=env_float("TRUCK_ENABLE_AFTER_PAN_CENTERED_MS", 500.0),
         pan_control_mode=env_str("PAN_CONTROL_MODE", "BEARING_VELOCITY").strip().upper(),
         pan_kp_raw_per_px=env_float("PAN_KP_RAW_PER_PX", 0.45),
-        pan_bearing_kp_raw_per_deg=env_float("PAN_BEARING_KP_RAW_PER_DEG", 2.0),
-        pan_bearing_kd_raw_per_deg_s=env_float("PAN_BEARING_KD_RAW_PER_DEG_S", 0.35),
+        pan_bearing_kp_raw_per_deg=env_float("PAN_BEARING_KP_RAW_PER_DEG", 3.0),
+        pan_bearing_kd_raw_per_deg_s=env_float("PAN_BEARING_KD_RAW_PER_DEG_S", 0.50),
         pan_bearing_moving_deadband_deg=env_float("PAN_BEARING_MOVING_DEADBAND_DEG", 1.0),
-        pan_velocity_filter_tau_s=env_float("PAN_VELOCITY_FILTER_TAU_S", 0.25),
-        pan_command_ramp_raw_per_s=env_float("PAN_COMMAND_RAMP_RAW_PER_S", motor.pan_ramp_raw_per_s),
+        pan_velocity_filter_tau_s=env_float("PAN_VELOCITY_FILTER_TAU_S", 0.12),
+        pan_command_ramp_raw_per_s=env_float("PAN_COMMAND_RAMP_RAW_PER_S", max(motor.pan_ramp_raw_per_s, 120.0)),
         truck_kp_raw_per_px=env_float("TRUCK_KP_RAW_PER_PX", 0.08),
         pan_error_filter_alpha=env_float("PAN_ERROR_FILTER_ALPHA", 1.0),
         pan_error_filter_tau_s=env_float("PAN_ERROR_FILTER_TAU_S", 0.0),
@@ -324,7 +326,6 @@ def load_runtime_config() -> RuntimeConfig:
         target_image_y_px=env_optional_float("MOTOR_TARGET_IMAGE_Y_PX"),
         stationary_hold_enabled=env_bool("STATIONARY_HOLD_ENABLED", True),
         stationary_hold_min_quality=env_float("STATIONARY_HOLD_MIN_QUALITY", 0.60),
-        stationary_hold_min_stationary_conf=env_float("STATIONARY_HOLD_MIN_STATIONARY_CONF", 0.80),
         stationary_hold_pan_window_px=env_float("STATIONARY_HOLD_PAN_WINDOW_PX", 500.0),
         stationary_hold_escape_window_px=env_float("STATIONARY_HOLD_ESCAPE_WINDOW_PX", 900.0),
         stationary_hold_room_radius_m=env_float("STATIONARY_HOLD_ROOM_RADIUS_M", 0.12),
