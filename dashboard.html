@@ -300,6 +300,7 @@
           <div class="stat"><span class="stat-label">Camera Pan</span><span id="cameraPanOut" class="stat-value">n/a</span></div>
           <div class="stat"><span class="stat-label">Desired Pan</span><span id="desiredPanOut" class="stat-value">n/a</span></div>
           <div class="stat"><span class="stat-label">Image Error</span><span id="imageErrorOut" class="stat-value">n/a</span></div>
+          <div class="stat"><span class="stat-label">Pan Raw</span><span id="panRawOut" class="stat-value">n/a</span></div>
           <div class="stat"><span class="stat-label">Motor Mode</span><span id="motorModeOut" class="stat-value">n/a</span></div>
         </div>
 
@@ -340,6 +341,7 @@
     const cameraPanOut = document.getElementById('cameraPanOut');
     const desiredPanOut = document.getElementById('desiredPanOut');
     const imageErrorOut = document.getElementById('imageErrorOut');
+    const panRawOut = document.getElementById('panRawOut');
     const motorModeOut = document.getElementById('motorModeOut');
 
     const dims = { w: 980, h: 780, pad: 78 };
@@ -744,6 +746,9 @@
         desiredPanOut.textContent = 'n/a';
       }
       imageErrorOut.textContent = projection ? fmt(projection.error_x_px, 1, ' px') : 'n/a';
+      panRawOut.textContent = control
+        ? `cmd ${fmt(control.cmd_logical_pan, 0)} / act ${fmt(control.actual_logical_pan_raw, 0)}`
+        : 'n/a';
       motorModeOut.textContent = control?.mode ?? 'n/a';
     }
 

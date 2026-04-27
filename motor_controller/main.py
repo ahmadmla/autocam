@@ -131,6 +131,8 @@ class MotorControllerApp:
         self.logical_truck_command = 0
         self.driver_pan_command = 0
         self.driver_truck_command = 0
+        self.last_pan_driver_direction = 0
+        self.last_truck_driver_direction = 0
         self.latest_actual_pan_raw = 0.0
         self.latest_actual_truck_raw = 0.0
         self.latest_statuses: Dict[int, MotorStatus] = {}
@@ -176,6 +178,8 @@ class MotorControllerApp:
         self.centered_since_monotonic = None
         self._reset_pan_control_state()
         self.truck_error_filtered = 0.0
+        self.last_pan_driver_direction = 0
+        self.last_truck_driver_direction = 0
         self._clear_stationary_hold("arm")
         LOG.warning(
             "motor_state=armed pose_estimate=rail=%.3f x=%.3f y=%.3f pan=%.2f live=%s",
@@ -192,6 +196,8 @@ class MotorControllerApp:
         self.armed = False
         self.pose_estimator.invalidate()
         self._reset_pan_control_state()
+        self.last_pan_driver_direction = 0
+        self.last_truck_driver_direction = 0
         self._clear_stationary_hold("disarm")
         self.stop_motors()
 
@@ -728,15 +734,26 @@ class MotorControllerApp:
                 self.driver_truck_command = 0
 
     @staticmethod
-    def _driver_direction_from_status(status: MotorStatus, fallback_driver_command: int) -> int:
+    def _driver_direction_from_status(
+        status: MotorStatus,
+        fallback_driver_command: int,
+        last_driver_direction: int,
+    ) -> int:
         if status.run_status == RUN_FORWARD:
             return 1
         if status.run_status == RUN_REVERSE:
             return -1
+        actual_speed = int(status.actual_speed_raw or 0)
+        if actual_speed < 0:
+            return -1
+        if actual_speed > 0 and fallback_driver_command == 0 and last_driver_direction:
+            return last_driver_direction
         if fallback_driver_command > 0:
             return 1
         if fallback_driver_command < 0:
             return -1
+        if actual_speed > 0:
+            return 1
         return 0
 
     def _logical_actual_speeds(self, statuses: Dict[int, MotorStatus]) -> Tuple[float, float]:
@@ -745,13 +762,27 @@ class MotorControllerApp:
         if self.config.motor.pan_enabled:
             status = statuses.get(self.config.motor.pan_motor_id)
             if status is not None:
-                driver_direction = self._driver_direction_from_status(status, self.driver_pan_command)
-                pan_raw = driver_direction * abs(int(status.actual_speed_raw or 0)) * self.config.motor.pan_sign
+                driver_direction = self._driver_direction_from_status(
+                    status,
+                    self.driver_pan_command,
+                    self.last_pan_driver_direction,
+                )
+                actual_raw = abs(int(status.actual_speed_raw or 0))
+                if driver_direction:
+                    self.last_pan_driver_direction = driver_direction
+                pan_raw = driver_direction * actual_raw * self.config.motor.pan_sign
         if self.config.motor.truck_enabled:
             status = statuses.get(self.config.motor.truck_motor_id)
             if status is not None:
-                driver_direction = self._driver_direction_from_status(status, self.driver_truck_command)
-                truck_raw = driver_direction * abs(int(status.actual_speed_raw or 0)) * self.config.motor.truck_sign
+                driver_direction = self._driver_direction_from_status(
+                    status,
+                    self.driver_truck_command,
+                    self.last_truck_driver_direction,
+                )
+                actual_raw = abs(int(status.actual_speed_raw or 0))
+                if driver_direction:
+                    self.last_truck_driver_direction = driver_direction
+                truck_raw = driver_direction * actual_raw * self.config.motor.truck_sign
         return pan_raw, truck_raw
 
     @staticmethod
