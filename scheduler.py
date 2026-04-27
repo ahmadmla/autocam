@@ -46,6 +46,8 @@ MQTT_QOS = env_int("MQTT_QOS", 0)
 
 RAW_TOPIC = "uwb/raw/+"
 CMD_TOPIC_BASE = "uwb/cmd"
+TARGET_SELECT_TOPIC = env_str("AUTOCAM_TARGET_SELECT_TOPIC", "autocam/target/select")
+PUBLISH_TARGET_SELECT = bool(env_int("SCHEDULER_PUBLISH_TARGET_SELECT", 0))
 
 NODES = [
     node_id.strip()
@@ -140,6 +142,22 @@ class RoundRobinScheduler:
         }
         self.client.publish(
             topic,
+            json.dumps(payload, separators=(",", ":"), allow_nan=False),
+            qos=MQTT_QOS,
+            retain=False,
+        )
+        if PUBLISH_TARGET_SELECT:
+            self.publish_target_select(node_id, token)
+
+    def publish_target_select(self, node_id: str, token: str) -> None:
+        payload = {
+            "node_id": node_id,
+            "source": "scheduler",
+            "slot_token": token,
+            "ts": time.time(),
+        }
+        self.client.publish(
+            TARGET_SELECT_TOPIC,
             json.dumps(payload, separators=(",", ":"), allow_nan=False),
             qos=MQTT_QOS,
             retain=False,
@@ -297,6 +315,7 @@ def main() -> None:
         f"burst_timeout={BURST_RESPONSE_TIMEOUT_S:.2f}s "
         f"burst_grace={BURST_POST_PAUSE_GRACE_S:.2f}s "
         f"single_node={SINGLE_NODE_MODE} "
+        f"publish_target_select={PUBLISH_TARGET_SELECT} "
         f"timeout_skip={TIMEOUT_SKIP_THRESHOLD} "
         f"cooldown={TIMEOUT_COOLDOWN_S:.2f}s",
         flush=True,

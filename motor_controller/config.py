@@ -130,11 +130,15 @@ class ControlRuntimeConfig:
     truck_enable_after_pan_centered_ms: float
     pan_control_mode: str
     pan_kp_raw_per_px: float
+    pan_bearing_deadband_deg: float
     pan_bearing_kp_raw_per_deg: float
     pan_bearing_kd_raw_per_deg_s: float
     pan_bearing_moving_deadband_deg: float
     pan_velocity_filter_tau_s: float
     pan_command_ramp_raw_per_s: float
+    pan_goto_target_time_s: float
+    pan_goto_speed_factor: float
+    pan_goto_min_raw_speed: int
     truck_kp_raw_per_px: float
     pan_error_filter_alpha: float
     pan_error_filter_tau_s: float
@@ -307,11 +311,15 @@ def load_runtime_config() -> RuntimeConfig:
         truck_enable_after_pan_centered_ms=env_float("TRUCK_ENABLE_AFTER_PAN_CENTERED_MS", 500.0),
         pan_control_mode=env_str("PAN_CONTROL_MODE", "BEARING_VELOCITY").strip().upper(),
         pan_kp_raw_per_px=env_float("PAN_KP_RAW_PER_PX", 0.45),
+        pan_bearing_deadband_deg=env_float("PAN_BEARING_DEADBAND_DEG", 2.0),
         pan_bearing_kp_raw_per_deg=env_float("PAN_BEARING_KP_RAW_PER_DEG", 3.0),
         pan_bearing_kd_raw_per_deg_s=env_float("PAN_BEARING_KD_RAW_PER_DEG_S", 0.50),
         pan_bearing_moving_deadband_deg=env_float("PAN_BEARING_MOVING_DEADBAND_DEG", 1.0),
         pan_velocity_filter_tau_s=env_float("PAN_VELOCITY_FILTER_TAU_S", 0.12),
         pan_command_ramp_raw_per_s=env_float("PAN_COMMAND_RAMP_RAW_PER_S", max(motor.pan_ramp_raw_per_s, 120.0)),
+        pan_goto_target_time_s=max(0.05, env_float("PAN_GOTO_TARGET_TIME_S", 0.35)),
+        pan_goto_speed_factor=max(0.1, env_float("PAN_GOTO_SPEED_FACTOR", 1.0)),
+        pan_goto_min_raw_speed=max(0, env_int("PAN_GOTO_MIN_RAW_SPEED", 2)),
         truck_kp_raw_per_px=env_float("TRUCK_KP_RAW_PER_PX", 0.08),
         pan_error_filter_alpha=env_float("PAN_ERROR_FILTER_ALPHA", 1.0),
         pan_error_filter_tau_s=env_float("PAN_ERROR_FILTER_TAU_S", 0.0),

@@ -280,11 +280,13 @@ class MotorControllerApp:
         node_id = str(payload.get("node_id") or "").strip()
         if not node_id:
             return
+        if node_id == self.selected_node:
+            return
         self.selected_node = node_id
         self.centered_since_monotonic = None
         self._reset_pan_control_state()
         self._clear_stationary_hold("target_select")
-        LOG.warning("target_select node=%s", node_id)
+        LOG.warning("target_select node=%s source=%s", node_id, payload.get("source") or "manual")
 
     def handle_vision_correction(self, payload: dict) -> None:
         target_px = payload.get("target_px") or {}
@@ -498,6 +500,15 @@ class MotorControllerApp:
             return camera_pose.pan_deg
         return math.degrees(math.atan2(dx, dy))
 
+    def _target_image_x_angle_offset_deg(self) -> float:
+        target_x, _target_y = self.target_image_center()
+        fx = max(abs(self.config.camera.fx), 1e-9)
+        return math.degrees(math.atan((target_x - self.config.camera.cx) / fx))
+
+    def _desired_pan_deg_for_framing(self, camera_pose, target: FilteredPoseMessage) -> Tuple[float, float]:
+        desired_bearing_deg = self._desired_bearing_deg(camera_pose, target)
+        return desired_bearing_deg, desired_bearing_deg - self._target_image_x_angle_offset_deg()
+
     def _bearing_velocity_pan_command(
         self,
         target: FilteredPoseMessage,
@@ -505,8 +516,8 @@ class MotorControllerApp:
         now: float,
         dt_s: float,
     ) -> Tuple[int, str, float, float, float]:
-        desired_bearing_deg = self._desired_bearing_deg(camera_pose, target)
-        pan_error_deg = self._normalize_angle_deg(desired_bearing_deg - camera_pose.pan_deg)
+        desired_bearing_deg, desired_pan_deg = self._desired_pan_deg_for_framing(camera_pose, target)
+        pan_error_deg = self._normalize_angle_deg(desired_pan_deg - camera_pose.pan_deg)
         bearing_rate_deg_s = 0.0
         if self.pan_last_desired_bearing_deg is not None and self.pan_last_bearing_monotonic is not None:
             bearing_dt_s = clamp(now - self.pan_last_bearing_monotonic, 0.0, 1.0)
@@ -552,6 +563,52 @@ class MotorControllerApp:
             dt_s,
         )
         return pan_raw, "_BEARING_VELOCITY", desired_bearing_deg, pan_error_deg, bearing_rate_deg_s
+
+    def _bearing_goto_pan_command(
+        self,
+        target: FilteredPoseMessage,
+        camera_pose,
+        now: float,
+        dt_s: float,
+    ) -> Tuple[int, str, float, float, float]:
+        desired_bearing_deg, desired_pan_deg = self._desired_pan_deg_for_framing(camera_pose, target)
+        pan_error_deg = self._normalize_angle_deg(desired_pan_deg - camera_pose.pan_deg)
+        bearing_rate_deg_s = 0.0
+        if self.pan_last_desired_bearing_deg is not None and self.pan_last_bearing_monotonic is not None:
+            bearing_dt_s = clamp(now - self.pan_last_bearing_monotonic, 0.0, 1.0)
+            if bearing_dt_s > 1e-6:
+                bearing_delta_deg = self._normalize_angle_deg(desired_bearing_deg - self.pan_last_desired_bearing_deg)
+                bearing_rate_deg_s = bearing_delta_deg / bearing_dt_s
+        self.pan_last_desired_bearing_deg = desired_bearing_deg
+        self.pan_last_bearing_monotonic = now
+
+        tolerance_deg = max(0.0, self.config.control.pan_bearing_deadband_deg)
+        effective_error_deg = max(0.0, abs(pan_error_deg) - tolerance_deg)
+        if effective_error_deg <= 0.0:
+            raw_target = 0.0
+        else:
+            raw_abs = (
+                self.config.control.pan_goto_speed_factor
+                * effective_error_deg
+                / max(
+                    self.config.motor.pan_deg_per_raw_speed_s
+                    * self.config.control.pan_goto_target_time_s,
+                    1e-9,
+                )
+            )
+            raw_abs = max(float(self.config.control.pan_goto_min_raw_speed), raw_abs)
+            raw_target = math.copysign(
+                min(raw_abs, float(self.config.motor.pan_max_raw_speed)),
+                pan_error_deg,
+            )
+
+        pan_raw = self._ramp_with_rate(
+            self.logical_pan_command,
+            int(round(raw_target)),
+            self.config.control.pan_command_ramp_raw_per_s,
+            dt_s,
+        )
+        return pan_raw, "_BEARING_GOTO", desired_bearing_deg, pan_error_deg, bearing_rate_deg_s
 
     def _apply_pan_direction_hysteresis(self, desired_pan_raw: int, now: float) -> Tuple[int, str]:
         desired_direction = self._sign(desired_pan_raw)
@@ -717,8 +774,8 @@ class MotorControllerApp:
         error_x: Optional[float]
         source = "uwb_projection"
         projection_valid = True
-        desired_bearing_deg = self._desired_bearing_deg(camera_pose, target)
-        pan_error_deg = self._normalize_angle_deg(desired_bearing_deg - camera_pose.pan_deg)
+        desired_bearing_deg, desired_pan_deg = self._desired_pan_deg_for_framing(camera_pose, target)
+        pan_error_deg = self._normalize_angle_deg(desired_pan_deg - camera_pose.pan_deg)
         try:
             projected = project_floor_point(
                 WorldPoint(target.x_m, target.y_m, 0.0),
@@ -729,7 +786,7 @@ class MotorControllerApp:
             target_x, _target_y = self.target_image_center()
             error_x = projected.x_px - target_x
         except ProjectionError:
-            if self.config.control.pan_control_mode != "BEARING_VELOCITY":
+            if self.config.control.pan_control_mode not in {"BEARING_VELOCITY", "BEARING_GOTO"}:
                 raise
             projected = None
             error_x = None
@@ -762,7 +819,17 @@ class MotorControllerApp:
         pan_already_ramped = False
         bearing_rate_deg_s: Optional[float] = None
 
-        if self.config.control.pan_control_mode == "BEARING_VELOCITY":
+        if self.config.control.pan_control_mode == "BEARING_GOTO":
+            filtered_error_x = error_x or 0.0
+            (
+                pan_raw,
+                pan_hold_mode,
+                desired_bearing_deg,
+                pan_error_deg,
+                bearing_rate_deg_s,
+            ) = self._bearing_goto_pan_command(target, camera_pose, now, dt_s)
+            pan_already_ramped = True
+        elif self.config.control.pan_control_mode == "BEARING_VELOCITY":
             filtered_error_x = error_x or 0.0
             (
                 pan_raw,
@@ -1284,6 +1351,7 @@ def main() -> None:
         "rail_limits=(%.3f,%.3f) rail_soft_margin=%.3f control_hz=%.1f status_poll_s=%.3f log_interval_s=%.3f "
         "pan_mode=%s pan_max=%s pan_deadband=%.1f pan_kp=%.3f pan_bearing_kp=%.3f pan_bearing_kd=%.3f "
         "pan_bearing_deadband=%.2f pan_velocity_filter_tau=%.3f pan_command_ramp=%.1f "
+        "pan_goto_target_time=%.3f pan_goto_speed_factor=%.2f pan_goto_min_raw=%s "
         "pan_ramp=%.1f pan_filter_tau=%.3f pan_flip_hold_ms=%.0f pan_center_hold_ms=%.0f "
         "stationary_hold=%s stationary_hold_min_q=%.2f stationary_hold_window_px=%.1f "
         "stationary_hold_escape_px=%.1f stationary_hold_room_radius_m=%.3f",
@@ -1315,9 +1383,12 @@ def main() -> None:
         config.control.pan_kp_raw_per_px,
         config.control.pan_bearing_kp_raw_per_deg,
         config.control.pan_bearing_kd_raw_per_deg_s,
-        config.control.pan_bearing_moving_deadband_deg,
+        config.control.pan_bearing_deadband_deg,
         config.control.pan_velocity_filter_tau_s,
         config.control.pan_command_ramp_raw_per_s,
+        config.control.pan_goto_target_time_s,
+        config.control.pan_goto_speed_factor,
+        config.control.pan_goto_min_raw_speed,
         config.motor.pan_ramp_raw_per_s,
         config.control.pan_error_filter_tau_s,
         config.control.pan_direction_flip_hold_ms,
