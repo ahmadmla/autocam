@@ -643,11 +643,12 @@ class TrackingPipeline:
             self.last_measurement_pose = measurement_pose
 
         quality = build_quality(selected_result, measurement_result, raw_result, success_count)
-        final_pose, filter_debug = self.tracker.update(
+        tracking_pose, filter_debug = self.tracker.update(
             measurement_pose,
             timestamp,
             quality["score"],
         )
+        final_pose = tracking_pose
 
         self._update_stationary_analysis(
             measurement_result,
@@ -703,6 +704,7 @@ class TrackingPipeline:
                 }
             ),
             "raw_pose": point_dict(raw_pose),
+            "tracking_pose": point_dict(tracking_pose),
             "pose": point_dict(final_pose),
             "quality": quality,
         }
@@ -942,6 +944,10 @@ class MqttRawReceiver:
             "node_id": node_id,
             "timestamp": entry.get("timestamp"),
             "sequence_number": entry.get("sequence_number"),
+            "tracking_pose": {
+                "x_m": (entry.get("tracking_pose") or {}).get("x_m"),
+                "y_m": (entry.get("tracking_pose") or {}).get("y_m"),
+            },
             "pose": {
                 "x_m": pose.get("x_m"),
                 "y_m": pose.get("y_m"),
@@ -950,6 +956,7 @@ class MqttRawReceiver:
                 "score": quality.get("score"),
                 "pose_mode": quality.get("pose_mode"),
                 "filter_mode": quality.get("filter_mode"),
+                "stationary_confidence": quality.get("stationary_confidence"),
                 "stationary_locked": quality.get("stationary_locked", False),
             },
         }
