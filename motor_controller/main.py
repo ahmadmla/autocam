@@ -856,23 +856,43 @@ class MotorControllerApp:
 
         if self.config.control.pan_control_mode == "BEARING_GOTO":
             filtered_error_x = error_x or 0.0
-            (
-                pan_raw,
-                pan_hold_mode,
-                desired_bearing_deg,
-                pan_error_deg,
-                bearing_rate_deg_s,
-            ) = self._bearing_goto_pan_command(target, camera_pose, now, dt_s)
+            if projection_valid and error_x is not None and abs(error_x) <= self.config.control.pan_image_deadband_px:
+                pan_raw = self._ramp_with_rate(
+                    self.logical_pan_command,
+                    0,
+                    self.config.control.pan_command_ramp_raw_per_s,
+                    dt_s,
+                )
+                pan_hold_mode = "_FRAME_HOLD"
+                bearing_rate_deg_s = 0.0
+            else:
+                (
+                    pan_raw,
+                    pan_hold_mode,
+                    desired_bearing_deg,
+                    pan_error_deg,
+                    bearing_rate_deg_s,
+                ) = self._bearing_goto_pan_command(target, camera_pose, now, dt_s)
             pan_already_ramped = True
         elif self.config.control.pan_control_mode == "BEARING_VELOCITY":
             filtered_error_x = error_x or 0.0
-            (
-                pan_raw,
-                pan_hold_mode,
-                desired_bearing_deg,
-                pan_error_deg,
-                bearing_rate_deg_s,
-            ) = self._bearing_velocity_pan_command(target, camera_pose, now, dt_s)
+            if projection_valid and error_x is not None and abs(error_x) <= self.config.control.pan_image_deadband_px:
+                pan_raw = self._ramp_with_rate(
+                    self.logical_pan_command,
+                    0,
+                    self.config.control.pan_command_ramp_raw_per_s,
+                    dt_s,
+                )
+                pan_hold_mode = "_FRAME_HOLD"
+                bearing_rate_deg_s = 0.0
+            else:
+                (
+                    pan_raw,
+                    pan_hold_mode,
+                    desired_bearing_deg,
+                    pan_error_deg,
+                    bearing_rate_deg_s,
+                ) = self._bearing_velocity_pan_command(target, camera_pose, now, dt_s)
             pan_already_ramped = True
         else:
             if error_x is None:
