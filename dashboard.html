@@ -233,6 +233,15 @@
       background: #fafafa;
     }
 
+    .camera-frame {
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #0f172a;
+      overflow: hidden;
+    }
+
     @media (max-width: 1024px) {
       .grid {
         grid-template-columns: 1fr;
@@ -253,6 +262,7 @@
           <div><span class="dot" style="background:#6366f1"></span>Anchor footprint</div>
           <div><span class="dot" style="background:#f59e0b"></span>History trails</div>
           <div><span class="dot" style="background:#dc2626"></span>Current position</div>
+          <div><span class="dot" style="background:#111827"></span>Camera estimate</div>
         </div>
         <div id="nodeLegend" class="node-legend"></div>
       </div>
@@ -287,7 +297,14 @@
           <div class="stat"><span class="stat-label">Selected Y</span><span id="yOut" class="stat-value">0.000</span></div>
           <div class="stat"><span class="stat-label">Frames</span><span id="frameOut" class="stat-value">0 / 0</span></div>
           <div class="stat"><span class="stat-label">Timestamp</span><span id="timeOut" class="stat-value">n/a</span></div>
+          <div class="stat"><span class="stat-label">Camera Pan</span><span id="cameraPanOut" class="stat-value">n/a</span></div>
+          <div class="stat"><span class="stat-label">Desired Pan</span><span id="desiredPanOut" class="stat-value">n/a</span></div>
+          <div class="stat"><span class="stat-label">Image Error</span><span id="imageErrorOut" class="stat-value">n/a</span></div>
+          <div class="stat"><span class="stat-label">Motor Mode</span><span id="motorModeOut" class="stat-value">n/a</span></div>
         </div>
+
+        <div class="section-title">Camera view estimate</div>
+        <svg id="cameraFrame" class="camera-frame" viewBox="0 0 480 270" aria-label="Estimated camera frame"></svg>
 
         <div class="timeline-wrap">
           <div class="row" style="margin-bottom: 6px;">
@@ -319,10 +336,16 @@
     const nodeSelect = document.getElementById('nodeSelect');
     const nodeList = document.getElementById('nodeList');
     const nodeLegend = document.getElementById('nodeLegend');
+    const cameraFrame = document.getElementById('cameraFrame');
+    const cameraPanOut = document.getElementById('cameraPanOut');
+    const desiredPanOut = document.getElementById('desiredPanOut');
+    const imageErrorOut = document.getElementById('imageErrorOut');
+    const motorModeOut = document.getElementById('motorModeOut');
 
     const dims = { w: 980, h: 780, pad: 78 };
     const ANCHORS_URL = 'anchors.json';
     const HISTORY_URL_CANDIDATES = ['central_history.json', 'history.json'];
+    const MOTOR_STATE_URL = 'motor_state.json';
     const urlParams = new URLSearchParams(window.location.search);
     const requestedPollMs = Number(urlParams.get('poll'));
     const POLL_MS = Number.isFinite(requestedPollMs)
@@ -370,6 +393,8 @@
     let latestByNode = new Map();
     let selectedNode = ALL_NODES_VALUE;
     let selectedFrameIndex = 0;
+    let motorState = null;
+    let lastMotorStateRaw = '';
 
     let watchTimer = null;
     let watchInFlight = false;
@@ -432,6 +457,23 @@
       const date = new Date(ms);
       if (Number.isNaN(date.getTime())) return 'n/a';
       return date.toLocaleTimeString();
+    }
+
+    function fmt(value, digits = 1, suffix = '') {
+      const n = Number(value);
+      return Number.isFinite(n) ? `${n.toFixed(digits)}${suffix}` : 'n/a';
+    }
+
+    function normalizeAngleDeg(angleDeg) {
+      return ((angleDeg + 180) % 360 + 360) % 360 - 180;
+    }
+
+    function bearingEndPoint(origin, bearingDeg, lengthM) {
+      const rad = bearingDeg * Math.PI / 180;
+      return {
+        x: origin.x + Math.sin(rad) * lengthM,
+        y: origin.y + Math.cos(rad) * lengthM
+      };
     }
 
     function colorForNode(nodeId) {
@@ -691,6 +733,20 @@
       nodeCountOut.textContent = String(nodeIds.length);
     }
 
+    function refreshMotorStats() {
+      const pose = motorState?.pose_estimate;
+      const control = motorState?.control;
+      const projection = motorState?.projection;
+      cameraPanOut.textContent = pose ? fmt(pose.pan_deg, 2, ' deg') : 'n/a';
+      if (pose && control && Number.isFinite(Number(control.pan_error_deg))) {
+        desiredPanOut.textContent = fmt(pose.pan_deg + control.pan_error_deg, 2, ' deg');
+      } else {
+        desiredPanOut.textContent = 'n/a';
+      }
+      imageErrorOut.textContent = projection ? fmt(projection.error_x_px, 1, ' px') : 'n/a';
+      motorModeOut.textContent = control?.mode ?? 'n/a';
+    }
+
     function renderNodeLegend() {
       nodeLegend.innerHTML = nodeIds.length
         ? nodeIds.map(nodeId => `
@@ -901,6 +957,79 @@
       `;
     }
 
+    function drawCameraOverlay() {
+      const pose = motorState?.pose_estimate;
+      if (!pose || num(pose.x_m) === null || num(pose.y_m) === null || num(pose.pan_deg) === null) return '';
+      const camera = motorState?.camera ?? {};
+      const control = motorState?.control ?? {};
+      const target = motorState?.target;
+      const origin = { x: Number(pose.x_m), y: Number(pose.y_m) };
+      const panDeg = Number(pose.pan_deg);
+      const imageW = Number(camera.image_w) || 1920;
+      const fx = Math.max(Math.abs(Number(camera.fx) || 1450), 1e-9);
+      const halfFovDeg = Math.atan((imageW / 2) / fx) * 180 / Math.PI;
+      const rayLength = Math.max(0.8, Math.min(3.0, Math.hypot(geom.world.maxX - geom.world.minX, geom.world.maxY - geom.world.minY) * 0.22));
+      const forward = bearingEndPoint(origin, panDeg, rayLength);
+      const left = bearingEndPoint(origin, panDeg - halfFovDeg, rayLength * 0.85);
+      const right = bearingEndPoint(origin, panDeg + halfFovDeg, rayLength * 0.85);
+      const desiredBearing = num(control.desired_bearing_deg);
+      const desired = desiredBearing === null ? null : bearingEndPoint(origin, desiredBearing, rayLength * 0.9);
+      const targetLine = target && num(target.x_m) !== null && num(target.y_m) !== null
+        ? `<line x1="${sx(origin.x)}" y1="${sy(origin.y)}" x2="${sx(target.x_m)}" y2="${sy(target.y_m)}" stroke="#111827" stroke-width="1.8" stroke-dasharray="4 5" stroke-opacity="0.42" />`
+        : '';
+      const desiredLine = desired
+        ? `<line x1="${sx(origin.x)}" y1="${sy(origin.y)}" x2="${sx(desired.x)}" y2="${sy(desired.y)}" stroke="#059669" stroke-width="3" stroke-dasharray="8 5" />`
+        : '';
+
+      return `
+        <polygon points="${sx(origin.x)},${sy(origin.y)} ${sx(left.x)},${sy(left.y)} ${sx(right.x)},${sy(right.y)}" fill="#111827" fill-opacity="0.08" stroke="#111827" stroke-opacity="0.35" stroke-width="1.5" />
+        <line x1="${sx(origin.x)}" y1="${sy(origin.y)}" x2="${sx(forward.x)}" y2="${sy(forward.y)}" stroke="#111827" stroke-width="4" stroke-linecap="round" />
+        ${desiredLine}
+        ${targetLine}
+        <circle cx="${sx(origin.x)}" cy="${sy(origin.y)}" r="13" fill="#111827" stroke="white" stroke-width="3" />
+        <text x="${sx(origin.x) + 16}" y="${sy(origin.y) + 5}" font-size="14" fill="#111827" font-weight="700">cam ${fmt(panDeg, 1, ' deg')}</text>
+      `;
+    }
+
+    function drawCameraFrame() {
+      const camera = motorState?.camera;
+      const control = motorState?.control;
+      const projection = motorState?.projection;
+      const target = motorState?.target;
+      const imageW = Number(camera?.image_w) || 1920;
+      const imageH = Number(camera?.image_h) || 1080;
+      const scaleX = 480 / imageW;
+      const scaleY = 270 / imageH;
+      const targetX = Number(camera?.target_x_px ?? imageW / 2);
+      const targetY = Number(camera?.target_y_px ?? imageH / 2);
+      const targetFrameX = clamp(targetX * scaleX, 0, 480);
+      const targetFrameY = clamp(targetY * scaleY, 0, 270);
+      const holdWindowPx = Number(control?.stationary_hold_pan_window_px);
+      const holdRect = Number.isFinite(holdWindowPx)
+        ? `<rect x="${clamp((targetX - holdWindowPx) * scaleX, 0, 480)}" y="0" width="${clamp((holdWindowPx * 2) * scaleX, 0, 480)}" height="270" fill="#22c55e" fill-opacity="0.10" />`
+        : '';
+      const projectedDot = projection && Number.isFinite(Number(projection.x_px)) && Number.isFinite(Number(projection.y_px))
+        ? `<circle cx="${clamp(Number(projection.x_px) * scaleX, -24, 504)}" cy="${clamp(Number(projection.y_px) * scaleY, -24, 294)}" r="9" fill="#ef4444" stroke="white" stroke-width="3" />
+           <text x="${clamp(Number(projection.x_px) * scaleX + 13, 8, 420)}" y="${clamp(Number(projection.y_px) * scaleY - 12, 18, 252)}" font-size="14" fill="#fee2e2">${esc(target?.node_id ?? 'target')}</text>`
+        : `<text x="240" y="145" text-anchor="middle" font-size="15" fill="#cbd5e1">projection unavailable</text>`;
+      const mode = control?.mode ?? 'no motor state';
+      const pan = motorState?.pose_estimate?.pan_deg;
+      const bearing = control?.desired_bearing_deg;
+      const err = projection?.error_x_px;
+
+      cameraFrame.innerHTML = `
+        <rect x="0" y="0" width="480" height="270" fill="#0f172a" />
+        ${holdRect}
+        <line x1="${targetFrameX}" y1="0" x2="${targetFrameX}" y2="270" stroke="#22c55e" stroke-width="2" stroke-dasharray="6 6" />
+        <line x1="0" y1="${targetFrameY}" x2="480" y2="${targetFrameY}" stroke="#334155" stroke-width="1" />
+        <circle cx="${targetFrameX}" cy="${targetFrameY}" r="6" fill="#22c55e" stroke="white" stroke-width="2" />
+        ${projectedDot}
+        <rect x="12" y="12" width="456" height="52" rx="8" fill="#020617" fill-opacity="0.72" />
+        <text x="24" y="34" font-size="14" fill="#e5e7eb">${esc(mode)}</text>
+        <text x="24" y="54" font-size="12" fill="#94a3b8">pan ${fmt(pan, 2, ' deg')} | bearing ${fmt(bearing, 2, ' deg')} | err ${fmt(err, 1, ' px')}</text>
+      `;
+    }
+
     function drawBoundsText() {
       return `
         <text x="${dims.pad}" y="${dims.h - 20}" font-size="13" fill="#6b7280">x range: ${geom.world.minX.toFixed(2)} to ${geom.world.maxX.toFixed(2)} m</text>
@@ -918,9 +1047,11 @@
         ${drawFootprint()}
         ${states.map(drawTrail).join('')}
         ${drawAnchors()}
+        ${drawCameraOverlay()}
         ${states.map(drawCurrent).join('')}
         ${drawBoundsText()}
       `;
+      drawCameraFrame();
     }
 
     function stopPlayback() {
@@ -1014,14 +1145,34 @@
       }
     }
 
+    async function syncMotorState({ forceRedraw = false } = {}) {
+      if (usingUploadedFile) return false;
+      try {
+        const text = await fetchText(MOTOR_STATE_URL);
+        if (!forceRedraw && text === lastMotorStateRaw) return false;
+        motorState = JSON.parse(text);
+        lastMotorStateRaw = text;
+        refreshMotorStats();
+        draw();
+        return true;
+      } catch (err) {
+        motorState = null;
+        refreshMotorStats();
+        drawCameraFrame();
+        return false;
+      }
+    }
+
     async function syncAll(statusLabel = 'synced', { forceRedraw = false } = {}) {
       const anchorsChanged = await syncAnchors({ forceRedraw });
       const historyChanged = await syncHistory(statusLabel, { forceRedraw });
-      if (!anchorsChanged && !historyChanged && forceRedraw) {
+      const motorChanged = await syncMotorState({ forceRedraw });
+      if (!anchorsChanged && !historyChanged && !motorChanged && forceRedraw) {
         refreshStatsForSelection(statusLabel);
+        refreshMotorStats();
         draw();
       }
-      if (!anchorsChanged && !historyChanged && watchTimer) {
+      if (!anchorsChanged && !historyChanged && !motorChanged && watchTimer) {
         setStatus(`auto watching ${currentSourceName}`);
       }
     }
@@ -1163,6 +1314,7 @@
     applyAnchors(DEFAULT_ANCHOR_PROFILES[DEFAULT_PROFILE]);
     regroupHistory([]);
     refreshStatsForSelection('idle');
+    refreshMotorStats();
     draw();
     startWatching();
   </script>

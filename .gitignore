@@ -5,6 +5,8 @@ __pycache__/
 .env
 history.json
 central_history.json
+motor_state.json
+motor_state.json.tmp
 central_pose_logger_output.txt
 central_raw_input_log.txt
 *_node_sender_log.txt

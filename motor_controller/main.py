@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 try:
@@ -29,6 +30,8 @@ from .geometry import (
 )
 
 LOG = logging.getLogger("motor_controller")
+REPO_ROOT = Path(__file__).resolve().parent.parent
+MOTOR_STATE_PATH = REPO_ROOT / "motor_state.json"
 
 
 @dataclass
@@ -112,6 +115,7 @@ class MotorControllerApp:
         self.last_loop_monotonic: Optional[float] = None
         self.last_pose_poll_monotonic: Optional[float] = None
         self.last_log_monotonic = 0.0
+        self.last_visualizer_state_monotonic = 0.0
         self.centered_since_monotonic: Optional[float] = None
         self.pan_error_filtered: Optional[float] = None
         self.pan_last_direction = 0
@@ -1179,6 +1183,7 @@ class MotorControllerApp:
                 self.driver_pan_command,
                 self.driver_truck_command,
             )
+
         else:
             active_truck_min, active_truck_max = self.pose_estimator.active_truck_limits()
             LOG.info(
@@ -1211,6 +1216,98 @@ class MotorControllerApp:
                 self.driver_truck_command,
             )
 
+    def write_visualizer_state(
+        self,
+        command: AxisCommand,
+        target: Optional[FilteredPoseMessage],
+        now: float,
+        *,
+        force: bool = False,
+    ) -> None:
+        if not force and now - self.last_visualizer_state_monotonic < 0.05:
+            return
+        self.last_visualizer_state_monotonic = now
+
+        pose = self.pose_estimator.pose
+        target_x, target_y = self.target_image_center()
+        hold_distance_m = self._stationary_hold_distance_m(target) if target is not None else None
+        target_payload = None
+        if target is not None:
+            target_payload = {
+                "node_id": target.node_id,
+                "timestamp": target.timestamp,
+                "sequence_number": target.sequence_number,
+                "x_m": target.x_m,
+                "y_m": target.y_m,
+                "tracking_x_m": target.tracking_x_m,
+                "tracking_y_m": target.tracking_y_m,
+                "quality_score": target.quality_score,
+                "stationary_confidence": target.stationary_confidence,
+                "stationary_locked": target.stationary_locked,
+            }
+
+        payload = {
+            "timestamp": time.time(),
+            "monotonic": now,
+            "armed": self.armed,
+            "mqtt_connected": self.mqtt_connected,
+            "selected_node": self.selected_node,
+            "camera": {
+                "profile": self.config.camera.profile,
+                "image_w": self.config.camera.image_w,
+                "image_h": self.config.camera.image_h,
+                "fx": self.config.camera.fx,
+                "fy": self.config.camera.fy,
+                "cx": self.config.camera.cx,
+                "cy": self.config.camera.cy,
+                "target_x_px": target_x,
+                "target_y_px": target_y,
+            },
+            "pose_estimate": {
+                "rail_m": pose.rail_position_m,
+                "x_m": pose.x_m,
+                "y_m": pose.y_m,
+                "pan_deg": pose.pan_deg,
+                "height_m": pose.height_m,
+                "pitch_deg": pose.pitch_deg,
+                "roll_deg": pose.roll_deg,
+            },
+            "target": target_payload,
+            "projection": None if command.projected is None else {
+                "x_px": command.projected.x_px,
+                "y_px": command.projected.y_px,
+                "depth_m": command.projected.depth_m,
+                "error_x_px": command.error_x_px,
+            },
+            "control": {
+                "mode": command.mode,
+                "source": command.source,
+                "pan_control_mode": self.config.control.pan_control_mode,
+                "desired_bearing_deg": command.desired_bearing_deg,
+                "pan_error_deg": command.pan_error_deg,
+                "bearing_rate_deg_s": command.bearing_rate_deg_s,
+                "cmd_logical_pan": command.pan_raw,
+                "cmd_logical_truck": command.truck_raw,
+                "cmd_driver_pan": self.driver_pan_command,
+                "cmd_driver_truck": self.driver_truck_command,
+                "actual_logical_pan_raw": self.latest_actual_pan_raw,
+                "actual_logical_truck_raw": self.latest_actual_truck_raw,
+                "stationary_hold_active": self.stationary_hold_lock is not None,
+                "hold_distance_m": hold_distance_m,
+                "pan_bearing_deadband_deg": self.config.control.pan_bearing_deadband_deg,
+                "stationary_hold_pan_window_px": self.config.control.stationary_hold_pan_window_px,
+                "stationary_hold_min_quality": self.config.control.stationary_hold_min_quality,
+            },
+        }
+
+        try:
+            tmp_path = MOTOR_STATE_PATH.with_suffix(".json.tmp")
+            tmp_path.write_text(json.dumps(payload, separators=(",", ":"), allow_nan=False), encoding="utf-8")
+            tmp_path.replace(MOTOR_STATE_PATH)
+        except Exception as exc:
+            if self.config.motor.debug:
+                LOG.info("visualizer_state_write_failed type=%s detail=%s", type(exc).__name__, exc)
+
     def setup(self) -> None:
         self.motor_bus.connect()
         for motor_id in self.motor_ids:
@@ -1240,14 +1337,18 @@ class MotorControllerApp:
             if not self.armed or not self.pose_estimator.valid or not self.mqtt_connected:
                 self._clear_stationary_hold("unarmed_invalid_pose")
                 self.stop_motors()
-                self.log_tick(AxisCommand(0, 0, "UNARMED_INVALID_POSE", None, None, "none"), None, now)
+                command = AxisCommand(0, 0, "UNARMED_INVALID_POSE", None, None, "none")
+                self.write_visualizer_state(command, None, now)
+                self.log_tick(command, None, now)
                 return
 
             target = self.get_selected_pose(now)
             if target is None:
                 self._clear_stationary_hold("no_valid_target")
                 self.stop_motors()
-                self.log_tick(AxisCommand(0, 0, "NO_VALID_FILTERED_TARGET", None, None, "none"), None, now)
+                command = AxisCommand(0, 0, "NO_VALID_FILTERED_TARGET", None, None, "none")
+                self.write_visualizer_state(command, None, now)
+                self.log_tick(command, None, now)
                 return
 
             statuses = dict(self.latest_statuses)
@@ -1255,6 +1356,7 @@ class MotorControllerApp:
                 self._raise_faults(statuses)
             command = self.build_command(target, now, dt_s)
             self.send_command(command)
+            self.write_visualizer_state(command, target, now)
             self.log_tick(command, target, now)
         except ProjectionError as exc:
             pose = self.pose_estimator.pose
