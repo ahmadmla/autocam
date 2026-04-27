@@ -19,10 +19,10 @@ if __package__ in (None, ""):
     for candidate in (str(REPO_ROOT), str(PACKAGE_ROOT)):
         if candidate not in sys.path:
             sys.path.insert(0, candidate)
-    from config import env_bool, env_float, env_int, load_runtime_config
+    from config import env_bool, env_float, env_int, env_str, load_runtime_config
     from control import MixedMotorBus, MotorStatus, RUN_FORWARD, RUN_REVERSE
 else:
-    from .config import env_bool, env_float, env_int, load_runtime_config
+    from .config import env_bool, env_float, env_int, env_str, load_runtime_config
     from .control import MixedMotorBus, MotorStatus, RUN_FORWARD, RUN_REVERSE
 
 LOG = logging.getLogger("motor_manual")
@@ -112,6 +112,8 @@ class ManualSettings:
     goto_max_steps: int = 50
     limit_margin: float = 0.05
     goto_speed_factor: float = 1.0
+    goto_curve: str = "linear"
+    goto_log_raw_scale: float = 80.0
     goto_min_raw_speed: int = 1
     confirm_limit_override: bool = True
 
@@ -376,6 +378,33 @@ class ManualMotorSession:
         confirm = input("Type OVERRIDE to continue past the estimated bound: ").strip()
         return confirm == "OVERRIDE"
 
+    def _goto_raw_speed_from_error(
+        self,
+        abs_error: float,
+        *,
+        tolerance: float,
+        goto_max_duration_s: float,
+        goto_max_raw_speed: int,
+    ) -> tuple[int, float]:
+        effective_error = max(0.0, abs_error - tolerance)
+        linear_raw_speed = (
+            self.settings.goto_speed_factor
+            * effective_error
+            / max(self.axis.units_per_raw_speed_s * goto_max_duration_s, 1e-9)
+        )
+
+        if self.settings.goto_curve == "log":
+            log_scale = max(1.0, self.settings.goto_log_raw_scale)
+            curved_raw_speed = log_scale * math.log1p(linear_raw_speed / log_scale)
+        else:
+            curved_raw_speed = linear_raw_speed
+
+        command_raw_speed = min(
+            goto_max_raw_speed,
+            max(self.settings.goto_min_raw_speed, int(round(curved_raw_speed))),
+        )
+        return command_raw_speed, linear_raw_speed
+
     def pulse(
         self,
         logical_direction: int,
@@ -513,14 +542,11 @@ class ManualMotorSession:
                         f"estimated_{self.axis.unit_name}={self.axis.estimated_position:.4f}"
                     )
 
-                raw_speed_from_error = int(round(
-                    self.settings.goto_speed_factor
-                    * abs(error)
-                    / max(self.axis.units_per_raw_speed_s * goto_max_duration_s, 1e-9)
-                ))
-                command_raw_speed = min(
-                    goto_max_raw_speed,
-                    max(self.settings.goto_min_raw_speed, raw_speed_from_error),
+                command_raw_speed, linear_raw_speed = self._goto_raw_speed_from_error(
+                    abs(error),
+                    tolerance=tolerance,
+                    goto_max_duration_s=goto_max_duration_s,
+                    goto_max_raw_speed=goto_max_raw_speed,
                 )
                 driver_direction = direction * self.axis.driver_sign
                 if (
@@ -540,7 +566,8 @@ class ManualMotorSession:
                     print(
                         f"go label={label} target_{self.axis.unit_name}={target_position:.4f} "
                         f"estimated_{self.axis.unit_name}={self.axis.estimated_position:.4f} "
-                        f"error_{self.axis.unit_name}={error:.4f} raw_speed={command_raw_speed}",
+                        f"error_{self.axis.unit_name}={error:.4f} raw_speed={command_raw_speed} "
+                        f"linear_raw={linear_raw_speed:.1f} curve={self.settings.goto_curve}",
                         flush=True,
                     )
                     last_log_t = now
@@ -669,7 +696,10 @@ class ManualMotorSession:
         print(
             f"jog_raw_speed={self.settings.jog_raw_speed} jog_duration_s={self.settings.jog_duration_s:.3f} "
             f"goto_min_raw_speed={self.settings.goto_min_raw_speed} goto_max_raw_speed={self.settings.goto_max_raw_speed} "
-            f"goto_speed_factor={self.settings.goto_speed_factor:.2f} "
+            f"goto_speed_factor={self.settings.goto_speed_factor:.2f} goto_curve={self.settings.goto_curve} "
+            f"goto_log_raw_scale={self.settings.goto_log_raw_scale:.1f} "
+            f"goto_max_duration_s={self.settings.goto_max_duration_s:.3f} "
+            f"goto_tolerance={self.settings.goto_tolerance:.4f} "
             f"confirm_limit_override={int(self.settings.confirm_limit_override)} "
             f"settle_s={self.settings.settle_s:.3f} status_poll_s={self.settings.status_poll_s:.3f} "
             f"units_per_raw_speed_s={self.axis.units_per_raw_speed_s:.8f} "
@@ -840,6 +870,24 @@ def load_manual_settings(default_speed: int, *, axis_name: str) -> ManualSetting
         goto_tolerance = env_float("MOTOR_MANUAL_TRUCK_GOTO_TOLERANCE", shared_goto_tolerance)
     else:
         goto_tolerance = shared_goto_tolerance
+    if axis_name == "truck":
+        goto_curve = env_str(
+            "MOTOR_MANUAL_TRUCK_GOTO_CURVE",
+            env_str("MOTOR_MANUAL_GOTO_CURVE", "log"),
+        ).strip().lower()
+    elif axis_name == "pan":
+        goto_curve = env_str(
+            "MOTOR_MANUAL_PAN_GOTO_CURVE",
+            env_str("MOTOR_MANUAL_GOTO_CURVE", "linear"),
+        ).strip().lower()
+    else:
+        goto_curve = env_str("MOTOR_MANUAL_GOTO_CURVE", "linear").strip().lower()
+    if goto_curve not in {"linear", "log"}:
+        goto_curve = "log" if axis_name == "truck" else "linear"
+    goto_log_raw_scale = env_float(
+        f"MOTOR_MANUAL_{axis_name.upper()}_GOTO_LOG_RAW_SCALE",
+        env_float("MOTOR_MANUAL_GOTO_LOG_RAW_SCALE", 80.0),
+    )
     return ManualSettings(
         jog_raw_speed=jog_raw_speed,
         jog_duration_s=jog_duration_s,
@@ -854,6 +902,8 @@ def load_manual_settings(default_speed: int, *, axis_name: str) -> ManualSetting
         goto_max_steps=max(1, env_int("MOTOR_MANUAL_GOTO_MAX_STEPS", 50)),
         limit_margin=max(0.0, env_float("MOTOR_MANUAL_LIMIT_MARGIN_M", 0.05)),
         goto_speed_factor=max(0.1, env_float("MOTOR_MANUAL_GOTO_SPEED_FACTOR", 1.5)),
+        goto_curve=goto_curve,
+        goto_log_raw_scale=max(1.0, goto_log_raw_scale),
         goto_min_raw_speed=goto_min_raw_speed,
         confirm_limit_override=env_bool("MOTOR_MANUAL_CONFIRM_LIMIT_OVERRIDE", True),
     )
