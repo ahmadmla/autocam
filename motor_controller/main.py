@@ -550,7 +550,10 @@ class MotorControllerApp:
             return base_px
         if depth_m is None or not math.isfinite(depth_m) or depth_m <= 1e-6:
             return base_px
-        scale = self.config.control.pan_depth_reference_m / depth_m
+        if self.config.control.pan_depth_scaling_invert:
+            scale = depth_m / self.config.control.pan_depth_reference_m
+        else:
+            scale = self.config.control.pan_depth_reference_m / depth_m
         scale = clamp(
             scale,
             self.config.control.pan_depth_scale_min,

@@ -133,6 +133,7 @@ class ControlRuntimeConfig:
     pan_centered_threshold_px: float
     truck_enable_after_pan_centered_ms: float
     pan_depth_window_scaling_enabled: bool
+    pan_depth_scaling_invert: bool
     pan_depth_reference_m: float
     pan_depth_scale_min: float
     pan_depth_scale_max: float
@@ -333,6 +334,7 @@ def load_runtime_config() -> RuntimeConfig:
         pan_centered_threshold_px=env_float("PAN_CENTERED_THRESHOLD_PX", 60.0),
         truck_enable_after_pan_centered_ms=env_float("TRUCK_ENABLE_AFTER_PAN_CENTERED_MS", 500.0),
         pan_depth_window_scaling_enabled=env_bool("PAN_DEPTH_WINDOW_SCALING_ENABLED", False),
+        pan_depth_scaling_invert=env_bool("PAN_DEPTH_SCALING_INVERT", False),
         pan_depth_reference_m=max(0.1, env_float("PAN_DEPTH_REFERENCE_M", 2.0)),
         pan_depth_scale_min=max(0.1, env_float("PAN_DEPTH_SCALE_MIN", 0.45)),
         pan_depth_scale_max=max(0.1, env_float("PAN_DEPTH_SCALE_MAX", 1.6)),
