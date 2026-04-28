@@ -301,6 +301,9 @@
           <div class="stat"><span class="stat-label">Desired Pan</span><span id="desiredPanOut" class="stat-value">n/a</span></div>
           <div class="stat"><span class="stat-label">Image Error</span><span id="imageErrorOut" class="stat-value">n/a</span></div>
           <div class="stat"><span class="stat-label">Pan Raw</span><span id="panRawOut" class="stat-value">n/a</span></div>
+          <div class="stat"><span class="stat-label">Truck Rail</span><span id="truckRailOut" class="stat-value">n/a</span></div>
+          <div class="stat"><span class="stat-label">Rail Target</span><span id="railTargetOut" class="stat-value">n/a</span></div>
+          <div class="stat"><span class="stat-label">Rail Error</span><span id="railErrorOut" class="stat-value">n/a</span></div>
           <div class="stat"><span class="stat-label">Motor Mode</span><span id="motorModeOut" class="stat-value">n/a</span></div>
         </div>
 
@@ -342,6 +345,9 @@
     const desiredPanOut = document.getElementById('desiredPanOut');
     const imageErrorOut = document.getElementById('imageErrorOut');
     const panRawOut = document.getElementById('panRawOut');
+    const truckRailOut = document.getElementById('truckRailOut');
+    const railTargetOut = document.getElementById('railTargetOut');
+    const railErrorOut = document.getElementById('railErrorOut');
     const motorModeOut = document.getElementById('motorModeOut');
 
     const dims = { w: 980, h: 780, pad: 78 };
@@ -749,6 +755,13 @@
       panRawOut.textContent = control
         ? `cmd ${fmt(control.cmd_logical_pan, 0)} / act ${fmt(control.actual_logical_pan_raw, 0)}`
         : 'n/a';
+      truckRailOut.textContent = pose ? fmt(pose.rail_m, 3, ' m') : 'n/a';
+      railTargetOut.textContent = control?.committed_desired_rail_m !== null && control?.committed_desired_rail_m !== undefined
+        ? fmt(control.committed_desired_rail_m, 3, ' m')
+        : 'n/a';
+      railErrorOut.textContent = control?.rail_error_m !== null && control?.rail_error_m !== undefined
+        ? fmt(control.rail_error_m, 3, ' m')
+        : 'n/a';
       motorModeOut.textContent = control?.mode ?? 'n/a';
     }
 
@@ -982,6 +995,23 @@
       const targetLine = target && num(target.x_m) !== null && num(target.y_m) !== null
         ? `<line x1="${sx(origin.x)}" y1="${sy(origin.y)}" x2="${sx(target.x_m)}" y2="${sy(target.y_m)}" stroke="#111827" stroke-width="1.8" stroke-dasharray="4 5" stroke-opacity="0.42" />`
         : '';
+      const railPoint = (railM) => {
+        const originX = num(pose.rail_origin_x_m);
+        const originY = num(pose.rail_origin_y_m);
+        const heading = num(pose.rail_heading_deg);
+        if (originX === null || originY === null || heading === null || num(railM) === null) return null;
+        const rad = heading * Math.PI / 180;
+        return { x: originX + Number(railM) * Math.cos(rad), y: originY + Number(railM) * Math.sin(rad) };
+      };
+      const desiredRailPoint = railPoint(control.committed_desired_rail_m);
+      const predictedRailPoint = railPoint(control.predicted_rail_m);
+      const desiredRailMarker = desiredRailPoint
+        ? `<circle cx="${sx(desiredRailPoint.x)}" cy="${sy(desiredRailPoint.y)}" r="10" fill="#22c55e" fill-opacity="0.86" stroke="white" stroke-width="2" />
+           <text x="${sx(desiredRailPoint.x) + 13}" y="${sy(desiredRailPoint.y) + 4}" font-size="12" fill="#166534" font-weight="700">rail target</text>`
+        : '';
+      const predictedRailMarker = predictedRailPoint
+        ? `<circle cx="${sx(predictedRailPoint.x)}" cy="${sy(predictedRailPoint.y)}" r="7" fill="#0ea5e9" fill-opacity="0.85" stroke="white" stroke-width="2" />`
+        : '';
       const desiredLine = desired
         ? `<line x1="${sx(origin.x)}" y1="${sy(origin.y)}" x2="${sx(desired.x)}" y2="${sy(desired.y)}" stroke="#059669" stroke-width="3" stroke-dasharray="8 5" />`
         : '';
@@ -991,6 +1021,8 @@
         <line x1="${sx(origin.x)}" y1="${sy(origin.y)}" x2="${sx(forward.x)}" y2="${sy(forward.y)}" stroke="#111827" stroke-width="4" stroke-linecap="round" />
         ${desiredLine}
         ${targetLine}
+        ${desiredRailMarker}
+        ${predictedRailMarker}
         <circle cx="${sx(origin.x)}" cy="${sy(origin.y)}" r="13" fill="#111827" stroke="white" stroke-width="3" />
         <text x="${sx(origin.x) + 16}" y="${sy(origin.y) + 5}" font-size="14" fill="#111827" font-weight="700">cam ${fmt(panDeg, 1, ' deg')}</text>
       `;

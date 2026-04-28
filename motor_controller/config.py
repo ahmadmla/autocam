@@ -54,6 +54,10 @@ def env_optional_float(name: str, default: Optional[float] = None) -> Optional[f
         return default
 
 
+def clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
+
+
 @dataclass(frozen=True)
 class CameraIntrinsics:
     profile: str
@@ -145,7 +149,14 @@ class ControlRuntimeConfig:
     pan_goto_min_raw_speed: int
     pan_goto_curve: str
     pan_goto_log_raw_scale: float
+    truck_control_mode: str
     truck_kp_raw_per_px: float
+    truck_rail_kp_raw_per_m: float
+    truck_rail_deadband_m: float
+    truck_room_y_invert: bool
+    truck_pan_lookahead_fraction: float
+    truck_rail_target_filter_tau_s: float
+    truck_rail_target_update_deadband_m: float
     pan_error_filter_alpha: float
     pan_error_filter_tau_s: float
     pan_direction_flip_hold_ms: float
@@ -353,7 +364,18 @@ def load_runtime_config() -> RuntimeConfig:
                 env_float("MOTOR_MANUAL_PAN_GOTO_LOG_RAW_SCALE", env_float("MOTOR_MANUAL_GOTO_LOG_RAW_SCALE", 80.0)),
             ),
         ),
+        truck_control_mode=(
+            env_str("TRUCK_CONTROL_MODE", "IMAGE_ERROR").strip().upper()
+            if env_str("TRUCK_CONTROL_MODE", "IMAGE_ERROR").strip().upper() in {"IMAGE_ERROR", "ROOM_Y_POSITION"}
+            else "IMAGE_ERROR"
+        ),
         truck_kp_raw_per_px=env_float("TRUCK_KP_RAW_PER_PX", 0.08),
+        truck_rail_kp_raw_per_m=env_float("TRUCK_RAIL_KP_RAW_PER_M", 500.0),
+        truck_rail_deadband_m=max(0.0, env_float("TRUCK_RAIL_DEADBAND_M", 0.02)),
+        truck_room_y_invert=env_bool("TRUCK_ROOM_Y_INVERT", False),
+        truck_pan_lookahead_fraction=clamp(env_float("TRUCK_PAN_LOOKAHEAD_FRACTION", 0.5), 0.0, 1.0),
+        truck_rail_target_filter_tau_s=max(0.0, env_float("TRUCK_RAIL_TARGET_FILTER_TAU_S", 0.50)),
+        truck_rail_target_update_deadband_m=max(0.0, env_float("TRUCK_RAIL_TARGET_UPDATE_DEADBAND_M", 0.03)),
         pan_error_filter_alpha=env_float("PAN_ERROR_FILTER_ALPHA", 1.0),
         pan_error_filter_tau_s=env_float("PAN_ERROR_FILTER_TAU_S", 0.0),
         pan_direction_flip_hold_ms=env_float("PAN_DIRECTION_FLIP_HOLD_MS", 0.0),

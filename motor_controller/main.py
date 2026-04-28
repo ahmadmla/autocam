@@ -22,12 +22,14 @@ from .config import RuntimeConfig, load_runtime_config
 from .control import MixedMotorBus, MotorStatus, RUN_FORWARD, RUN_REVERSE
 from .geometry import (
     CameraPoseEstimator,
+    EstimatedCameraPose,
     ProjectedPoint,
     ProjectionError,
     WorldPoint,
     clamp,
     project_floor_point,
 )
+from uwb_pose import geometry as room_geometry
 
 LOG = logging.getLogger("motor_controller")
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -72,6 +74,30 @@ class AxisCommand:
     desired_bearing_deg: Optional[float] = None
     pan_error_deg: Optional[float] = None
     bearing_rate_deg_s: Optional[float] = None
+    truck_control_mode: str = "IMAGE_ERROR"
+    room_y_min_m: Optional[float] = None
+    room_y_max_m: Optional[float] = None
+    target_y_m: Optional[float] = None
+    raw_desired_rail_m: Optional[float] = None
+    filtered_desired_rail_m: Optional[float] = None
+    committed_desired_rail_m: Optional[float] = None
+    current_rail_m: Optional[float] = None
+    rail_error_m: Optional[float] = None
+    predicted_rail_m: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class RoomYTruckPlan:
+    room_y_min_m: float
+    room_y_max_m: float
+    target_y_m: float
+    raw_desired_rail_m: float
+    filtered_desired_rail_m: float
+    committed_desired_rail_m: float
+    current_rail_m: float
+    rail_error_m: float
+    predicted_rail_m: float
+    raw_command: int
 
 
 @dataclass
@@ -127,6 +153,8 @@ class MotorControllerApp:
         self.pan_velocity_filtered: Optional[float] = None
         self.pan_frame_hold_locked = False
         self.truck_error_filtered = 0.0
+        self.truck_rail_target_filtered: Optional[float] = None
+        self.truck_rail_target_committed: Optional[float] = None
         self.stationary_hold_lock: Optional[StationaryHoldLock] = None
         self.logical_pan_command = 0
         self.logical_truck_command = 0
@@ -179,6 +207,8 @@ class MotorControllerApp:
         self.centered_since_monotonic = None
         self._reset_pan_control_state()
         self.truck_error_filtered = 0.0
+        self.truck_rail_target_filtered = None
+        self.truck_rail_target_committed = None
         self.last_pan_driver_direction = 0
         self.last_truck_driver_direction = 0
         self._clear_stationary_hold("arm")
@@ -197,6 +227,8 @@ class MotorControllerApp:
         self.armed = False
         self.pose_estimator.invalidate()
         self._reset_pan_control_state()
+        self.truck_rail_target_filtered = None
+        self.truck_rail_target_committed = None
         self.last_pan_driver_direction = 0
         self.last_truck_driver_direction = 0
         self._clear_stationary_hold("disarm")
@@ -858,8 +890,110 @@ class MotorControllerApp:
             return True
         return False
 
+    def _room_y_bounds(self) -> Tuple[float, float]:
+        try:
+            room_geometry.refresh_anchor_config_if_needed()
+        except Exception as exc:
+            if self.config.motor.debug:
+                LOG.info("room_geometry_refresh_failed type=%s detail=%s", type(exc).__name__, exc)
+        room_y_min = float(room_geometry.GEOM.min_y)
+        room_y_max = float(room_geometry.GEOM.max_y)
+        if room_y_min > room_y_max:
+            room_y_min, room_y_max = room_y_max, room_y_min
+        if math.isclose(room_y_min, room_y_max, rel_tol=0.0, abs_tol=1e-9):
+            room_y_max = room_y_min + 1e-9
+        return room_y_min, room_y_max
+
+    def _room_y_to_rail(self, target_y_m: float, room_y_min: float, room_y_max: float) -> float:
+        truck_min, truck_max = self.pose_estimator.active_truck_limits()
+        room_y = clamp(float(target_y_m), room_y_min, room_y_max)
+        ratio = (room_y - room_y_min) / max(room_y_max - room_y_min, 1e-9)
+        if self.config.control.truck_room_y_invert:
+            ratio = 1.0 - ratio
+        return truck_min + ratio * (truck_max - truck_min)
+
+    def _room_y_truck_plan(self, target: FilteredPoseMessage, dt_s: float) -> RoomYTruckPlan:
+        room_y_min, room_y_max = self._room_y_bounds()
+        current_rail = self.pose_estimator.pose.rail_position_m
+        raw_desired_rail = self._room_y_to_rail(target.y_m, room_y_min, room_y_max)
+
+        if self.truck_rail_target_filtered is None or not math.isfinite(self.truck_rail_target_filtered):
+            filtered_rail = raw_desired_rail
+        else:
+            tau_s = max(0.0, self.config.control.truck_rail_target_filter_tau_s)
+            alpha = 1.0 - math.exp(-max(0.0, dt_s) / tau_s) if tau_s > 0.0 else 1.0
+            filtered_rail = (1.0 - alpha) * self.truck_rail_target_filtered + alpha * raw_desired_rail
+        truck_min, truck_max = self.pose_estimator.active_truck_limits()
+        filtered_rail = clamp(filtered_rail, truck_min, truck_max)
+        self.truck_rail_target_filtered = filtered_rail
+
+        update_deadband_m = self.config.control.truck_rail_target_update_deadband_m
+        if self.truck_rail_target_committed is None or not math.isfinite(self.truck_rail_target_committed):
+            committed_rail = filtered_rail
+        elif abs(filtered_rail - self.truck_rail_target_committed) > update_deadband_m:
+            committed_rail = filtered_rail
+        else:
+            committed_rail = self.truck_rail_target_committed
+        committed_rail = clamp(committed_rail, truck_min, truck_max)
+        self.truck_rail_target_committed = committed_rail
+
+        rail_error = committed_rail - current_rail
+        if abs(rail_error) <= self.config.control.truck_rail_deadband_m:
+            raw_command = 0
+        else:
+            raw_command = int(round(clamp(
+                rail_error * self.config.control.truck_rail_kp_raw_per_m,
+                -self.config.motor.truck_max_raw_speed,
+                self.config.motor.truck_max_raw_speed,
+            )))
+
+        predicted_rail = clamp(
+            current_rail + self.config.control.truck_pan_lookahead_fraction * rail_error,
+            truck_min,
+            truck_max,
+        )
+        return RoomYTruckPlan(
+            room_y_min_m=room_y_min,
+            room_y_max_m=room_y_max,
+            target_y_m=target.y_m,
+            raw_desired_rail_m=raw_desired_rail,
+            filtered_desired_rail_m=filtered_rail,
+            committed_desired_rail_m=committed_rail,
+            current_rail_m=current_rail,
+            rail_error_m=rail_error,
+            predicted_rail_m=predicted_rail,
+            raw_command=raw_command,
+        )
+
+    @staticmethod
+    def _command_with_room_y_metadata(command: AxisCommand, plan: Optional[RoomYTruckPlan]) -> AxisCommand:
+        if plan is None:
+            return command
+        command.truck_control_mode = "ROOM_Y_POSITION"
+        command.room_y_min_m = plan.room_y_min_m
+        command.room_y_max_m = plan.room_y_max_m
+        command.target_y_m = plan.target_y_m
+        command.raw_desired_rail_m = plan.raw_desired_rail_m
+        command.filtered_desired_rail_m = plan.filtered_desired_rail_m
+        command.committed_desired_rail_m = plan.committed_desired_rail_m
+        command.current_rail_m = plan.current_rail_m
+        command.rail_error_m = plan.rail_error_m
+        command.predicted_rail_m = plan.predicted_rail_m
+        return command
+
     def build_command(self, target: FilteredPoseMessage, now: float, dt_s: float) -> AxisCommand:
-        camera_pose = self.pose_estimator.pose
+        actual_camera_pose = self.pose_estimator.pose
+        room_y_mode = (
+            self.config.control.truck_control_mode == "ROOM_Y_POSITION"
+            and self.config.motor.truck_enabled
+        )
+        room_y_plan = self._room_y_truck_plan(target, dt_s) if room_y_mode else None
+        camera_pose: EstimatedCameraPose = actual_camera_pose
+        if room_y_plan is not None:
+            camera_pose = self.pose_estimator.pose_at_rail(
+                room_y_plan.predicted_rail_m,
+                pan_deg=actual_camera_pose.pan_deg,
+            )
         projected: Optional[ProjectedPoint]
         error_x: Optional[float]
         source = "uwb_projection"
@@ -895,17 +1029,25 @@ class MotorControllerApp:
             )
         )
         if stationary_hold_active:
-            return AxisCommand(
+            truck_raw = room_y_plan.raw_command if room_y_plan is not None else 0
+            mode = "STATIONARY_HOLD_ROOM_Y_TRUCK" if room_y_plan is not None else "STATIONARY_HOLD"
+            truck_blocked = self.pose_estimator.blocks_truck(truck_raw)
+            if truck_blocked:
+                truck_raw = 0
+                mode += "_TRUCK_SOFT_LIMIT"
+            if room_y_plan is not None and not truck_blocked:
+                truck_raw = self._ramp_axis("truck", self.logical_truck_command, truck_raw, dt_s)
+            return self._command_with_room_y_metadata(AxisCommand(
                 pan_raw=0,
-                truck_raw=0,
-                mode="STATIONARY_HOLD",
+                truck_raw=truck_raw,
+                mode=mode,
                 projected=projected,
                 error_x_px=error_x,
                 source=source,
                 desired_bearing_deg=desired_bearing_deg,
                 pan_error_deg=pan_error_deg,
                 bearing_rate_deg_s=0.0,
-            )
+            ), room_y_plan)
 
         safe_horizontal_envelope = bool(projected is not None and self._safe_horizontal_envelope(projected))
         pan_frame_hold_active = projection_valid and self._pan_frame_hold_active(
@@ -964,13 +1106,21 @@ class MotorControllerApp:
             mode = "PAN_BEARING_RECOVERY" + pan_hold_mode
             if not pan_enabled:
                 pan_raw = 0
+            truck_raw = room_y_plan.raw_command if room_y_plan is not None else 0
             pan_blocked = self.pose_estimator.blocks_pan(pan_raw)
             if pan_blocked:
                 pan_raw = 0
                 mode += "_PAN_SOFT_LIMIT"
-            return AxisCommand(
+            truck_blocked = self.pose_estimator.blocks_truck(truck_raw)
+            if truck_blocked:
+                truck_raw = 0
+                mode += "_TRUCK_SOFT_LIMIT"
+            if room_y_plan is not None and not truck_blocked:
+                truck_raw = self._ramp_axis("truck", self.logical_truck_command, truck_raw, dt_s)
+                mode += "_ROOM_Y_TRUCK"
+            return self._command_with_room_y_metadata(AxisCommand(
                 pan_raw=pan_raw,
-                truck_raw=0,
+                truck_raw=truck_raw,
                 mode=mode,
                 projected=None,
                 error_x_px=None,
@@ -978,7 +1128,7 @@ class MotorControllerApp:
                 desired_bearing_deg=desired_bearing_deg,
                 pan_error_deg=pan_error_deg,
                 bearing_rate_deg_s=bearing_rate_deg_s,
-            )
+            ), room_y_plan)
 
         centered = abs(filtered_error_x) <= self.config.control.pan_centered_threshold_px
         if centered:
@@ -987,33 +1137,36 @@ class MotorControllerApp:
         else:
             self.centered_since_monotonic = None
 
-        tau_s = max(0.0, self.config.control.truck_error_filter_tau_s)
-        if tau_s > 0.0:
-            alpha = 1.0 - math.exp(-max(0.0, dt_s) / tau_s)
+        if room_y_plan is not None:
+            truck_raw = room_y_plan.raw_command
         else:
-            alpha = clamp(self.config.control.truck_error_filter_alpha, 0.0, 1.0)
-        # Snap the filter to the raw error when the target crosses sides or when the
-        # error magnitude has jumped far from the filtered value, so the truck reacts
-        # promptly to targets appearing at new positions instead of creeping up via EWMA.
-        snap_threshold_px = max(
-            self.config.control.truck_image_deadband_px,
-            abs(self.truck_error_filtered) * 0.5,
-        )
-        sign_flipped = bool(self.truck_error_filtered) and bool(error_x) and (self.truck_error_filtered * error_x < 0.0)
-        large_jump = abs(error_x - self.truck_error_filtered) > snap_threshold_px
-        if sign_flipped or large_jump:
-            self.truck_error_filtered = error_x
-        else:
-            self.truck_error_filtered = (1.0 - alpha) * self.truck_error_filtered + alpha * error_x
-        truck_error = self._deadband(self.truck_error_filtered, self.config.control.truck_image_deadband_px)
-        truck_raw = int(round(clamp(
-            truck_error * self.config.control.truck_kp_raw_per_px,
-            -self.config.motor.truck_max_raw_speed,
-            self.config.motor.truck_max_raw_speed,
-        )))
+            tau_s = max(0.0, self.config.control.truck_error_filter_tau_s)
+            if tau_s > 0.0:
+                alpha = 1.0 - math.exp(-max(0.0, dt_s) / tau_s)
+            else:
+                alpha = clamp(self.config.control.truck_error_filter_alpha, 0.0, 1.0)
+            # Snap the filter to the raw error when the target crosses sides or when the
+            # error magnitude has jumped far from the filtered value, so the truck reacts
+            # promptly to targets appearing at new positions instead of creeping up via EWMA.
+            snap_threshold_px = max(
+                self.config.control.truck_image_deadband_px,
+                abs(self.truck_error_filtered) * 0.5,
+            )
+            sign_flipped = bool(self.truck_error_filtered) and bool(error_x) and (self.truck_error_filtered * error_x < 0.0)
+            large_jump = abs(error_x - self.truck_error_filtered) > snap_threshold_px
+            if sign_flipped or large_jump:
+                self.truck_error_filtered = error_x
+            else:
+                self.truck_error_filtered = (1.0 - alpha) * self.truck_error_filtered + alpha * error_x
+            truck_error = self._deadband(self.truck_error_filtered, self.config.control.truck_image_deadband_px)
+            truck_raw = int(round(clamp(
+                truck_error * self.config.control.truck_kp_raw_per_px,
+                -self.config.motor.truck_max_raw_speed,
+                self.config.motor.truck_max_raw_speed,
+            )))
 
         if truck_enabled and not pan_enabled:
-            mode = "TRUCK_ONLY_TRACK"
+            mode = "TRUCK_ONLY_ROOM_Y_TRACK" if room_y_plan is not None else "TRUCK_ONLY_TRACK"
             pan_raw = 0
             truck_blocked = self.pose_estimator.blocks_truck(truck_raw)
             if truck_blocked:
@@ -1021,7 +1174,7 @@ class MotorControllerApp:
                 mode += "_TRUCK_SOFT_LIMIT"
             if not truck_blocked:
                 truck_raw = self._ramp_axis("truck", self.logical_truck_command, truck_raw, dt_s)
-            return AxisCommand(
+            return self._command_with_room_y_metadata(AxisCommand(
                 pan_raw=0,
                 truck_raw=truck_raw,
                 mode=mode,
@@ -1031,7 +1184,7 @@ class MotorControllerApp:
                 desired_bearing_deg=desired_bearing_deg,
                 pan_error_deg=pan_error_deg,
                 bearing_rate_deg_s=bearing_rate_deg_s,
-            )
+            ), room_y_plan)
 
         if pan_enabled and not truck_enabled:
             mode = "PAN_ONLY_TRACK" + pan_hold_mode
@@ -1042,7 +1195,7 @@ class MotorControllerApp:
                 mode += "_PAN_SOFT_LIMIT"
             if not pan_blocked and not pan_already_ramped:
                 pan_raw = self._ramp_axis("pan", self.logical_pan_command, pan_raw, dt_s)
-            return AxisCommand(
+            return self._command_with_room_y_metadata(AxisCommand(
                 pan_raw=pan_raw,
                 truck_raw=0,
                 mode=mode,
@@ -1052,7 +1205,7 @@ class MotorControllerApp:
                 desired_bearing_deg=desired_bearing_deg,
                 pan_error_deg=pan_error_deg,
                 bearing_rate_deg_s=bearing_rate_deg_s,
-            )
+            ), room_y_plan)
 
         pan_pose = self.pose_estimator.pose.pan_deg
         pan_outside_preferred = (
@@ -1065,7 +1218,9 @@ class MotorControllerApp:
             and (now - self.centered_since_monotonic) >= centered_delay_s
         )
 
-        if not safe_horizontal_envelope:
+        if room_y_plan is not None:
+            mode = "PAN_ROOM_Y_TRUCK"
+        elif not safe_horizontal_envelope:
             mode = "PAN_PRIORITY_SAFE_ENVELOPE"
             truck_raw = 0
         elif abs(filtered_error_x) > self.config.control.pan_prealign_threshold_px:
@@ -1091,7 +1246,7 @@ class MotorControllerApp:
             pan_raw = self._ramp_axis("pan", self.logical_pan_command, pan_raw, dt_s)
         if not truck_blocked:
             truck_raw = self._ramp_axis("truck", self.logical_truck_command, truck_raw, dt_s)
-        return AxisCommand(
+        return self._command_with_room_y_metadata(AxisCommand(
             pan_raw=pan_raw,
             truck_raw=truck_raw,
             mode=mode,
@@ -1101,7 +1256,7 @@ class MotorControllerApp:
             desired_bearing_deg=desired_bearing_deg,
             pan_error_deg=pan_error_deg,
             bearing_rate_deg_s=bearing_rate_deg_s,
-        )
+        ), room_y_plan)
 
     def send_command(self, command: AxisCommand) -> None:
         pan_driver, truck_driver = self._driver_commands(command.pan_raw, command.truck_raw)
@@ -1136,6 +1291,33 @@ class MotorControllerApp:
             self.logical_truck_command = command.truck_raw
             self.driver_pan_command = pan_driver
             self.driver_truck_command = truck_driver
+
+    def _log_room_y_truck_tick(self, command: AxisCommand, target: FilteredPoseMessage) -> None:
+        if command.committed_desired_rail_m is None:
+            return
+        LOG.info(
+            "room_y_truck node=%s target_y=%.3f room_y=(%.3f,%.3f) desired_rail=(raw=%.3f,filt=%.3f,commit=%.3f) "
+            "rail=(current=%.3f,err=%.3f,pred=%.3f) pan=(desired=%.2f,current=%.2f,err=%.2f) truck_raw=%s mode=%s",
+            target.node_id,
+            command.target_y_m if command.target_y_m is not None else target.y_m,
+            command.room_y_min_m if command.room_y_min_m is not None else 0.0,
+            command.room_y_max_m if command.room_y_max_m is not None else 0.0,
+            command.raw_desired_rail_m if command.raw_desired_rail_m is not None else 0.0,
+            command.filtered_desired_rail_m if command.filtered_desired_rail_m is not None else 0.0,
+            command.committed_desired_rail_m,
+            command.current_rail_m if command.current_rail_m is not None else self.pose_estimator.pose.rail_position_m,
+            command.rail_error_m if command.rail_error_m is not None else 0.0,
+            command.predicted_rail_m if command.predicted_rail_m is not None else self.pose_estimator.pose.rail_position_m,
+            (
+                command.desired_bearing_deg - self._target_image_x_angle_offset_deg()
+                if command.desired_bearing_deg is not None
+                else -999.0
+            ),
+            self.pose_estimator.pose.pan_deg,
+            command.pan_error_deg if command.pan_error_deg is not None else -999.0,
+            command.truck_raw,
+            command.mode,
+        )
 
     def log_tick(self, command: AxisCommand, target: Optional[FilteredPoseMessage], now: float) -> None:
         if now - self.last_log_monotonic < self.config.control.log_interval_s:
@@ -1241,6 +1423,7 @@ class MotorControllerApp:
                     self.driver_pan_command,
                     self.driver_truck_command,
                 )
+            self._log_room_y_truck_tick(command, target)
             return
         hold_distance_m = self._stationary_hold_distance_m(target)
         hold_distance_log = hold_distance_m if hold_distance_m is not None else -1.0
@@ -1320,6 +1503,7 @@ class MotorControllerApp:
                 self.driver_pan_command,
                 self.driver_truck_command,
             )
+        self._log_room_y_truck_tick(command, target)
 
     def write_visualizer_state(
         self,
@@ -1393,6 +1577,9 @@ class MotorControllerApp:
                 "height_m": pose.height_m,
                 "pitch_deg": pose.pitch_deg,
                 "roll_deg": pose.roll_deg,
+                "rail_origin_x_m": self.config.camera_pose.rail_origin_x_m,
+                "rail_origin_y_m": self.config.camera_pose.rail_origin_y_m,
+                "rail_heading_deg": self.config.camera_pose.rail_heading_deg,
             },
             "target": target_payload,
             "projection": None if command.projected is None else {
@@ -1414,6 +1601,20 @@ class MotorControllerApp:
                 "cmd_driver_truck": self.driver_truck_command,
                 "actual_logical_pan_raw": self.latest_actual_pan_raw,
                 "actual_logical_truck_raw": self.latest_actual_truck_raw,
+                "truck_control_mode": command.truck_control_mode,
+                "room_y_min_m": command.room_y_min_m,
+                "room_y_max_m": command.room_y_max_m,
+                "target_y_m": command.target_y_m,
+                "raw_desired_rail_m": command.raw_desired_rail_m,
+                "filtered_desired_rail_m": command.filtered_desired_rail_m,
+                "committed_desired_rail_m": command.committed_desired_rail_m,
+                "current_rail_m": command.current_rail_m,
+                "rail_error_m": command.rail_error_m,
+                "predicted_rail_m": command.predicted_rail_m,
+                "desired_pan_deg": None
+                    if command.desired_bearing_deg is None
+                    else command.desired_bearing_deg - self._target_image_x_angle_offset_deg(),
+                "current_pan_deg": pose.pan_deg,
                 "stationary_hold_active": self.stationary_hold_lock is not None,
                 "pan_frame_hold_active": self.pan_frame_hold_locked,
                 "hold_distance_m": hold_distance_m,
@@ -1585,6 +1786,8 @@ def main() -> None:
         "pan_mode=%s pan_max=%s pan_deadband=%.1f pan_kp=%.3f pan_bearing_kp=%.3f pan_bearing_kd=%.3f "
         "pan_bearing_deadband=%.2f pan_velocity_filter_tau=%.3f pan_command_ramp=%.1f "
         "pan_goto_target_time=%.3f pan_goto_speed_factor=%.2f pan_goto_min_raw=%s pan_goto_curve=%s pan_goto_log_raw_scale=%.1f "
+        "truck_control_mode=%s truck_rail_kp=%.1f truck_rail_deadband=%.3f truck_room_y_invert=%s truck_pan_lookahead=%.2f "
+        "truck_rail_filter_tau=%.2f truck_rail_update_deadband=%.3f "
         "pan_ramp=%.1f pan_filter_tau=%.3f pan_flip_hold_ms=%.0f pan_center_hold_ms=%.0f "
         "stationary_hold=%s stationary_hold_min_q=%.2f stationary_hold_window_px=%.1f "
         "stationary_hold_escape_px=%.1f stationary_hold_room_radius_m=%.3f",
@@ -1624,6 +1827,13 @@ def main() -> None:
         config.control.pan_goto_min_raw_speed,
         config.control.pan_goto_curve,
         config.control.pan_goto_log_raw_scale,
+        config.control.truck_control_mode,
+        config.control.truck_rail_kp_raw_per_m,
+        config.control.truck_rail_deadband_m,
+        int(config.control.truck_room_y_invert),
+        config.control.truck_pan_lookahead_fraction,
+        config.control.truck_rail_target_filter_tau_s,
+        config.control.truck_rail_target_update_deadband_m,
         config.motor.pan_ramp_raw_per_s,
         config.control.pan_error_filter_tau_s,
         config.control.pan_direction_flip_hold_ms,

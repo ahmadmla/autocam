@@ -147,6 +147,13 @@ class CameraPoseEstimator:
     def active_truck_limits(self) -> Tuple[float, float]:
         return self._active_truck_limits()
 
+    def pose_at_rail(self, rail_position_m: float, pan_deg: float | None = None) -> EstimatedCameraPose:
+        """Return a temporary pose without mutating the tracked estimator state."""
+        truck_min_limit, truck_max_limit = self._active_truck_limits()
+        rail = clamp(float(rail_position_m), truck_min_limit, truck_max_limit)
+        pan = self.pose.pan_deg if pan_deg is None else float(pan_deg)
+        return self._pose_from_rail(rail, pan)
+
     def reset_to_start(self) -> EstimatedCameraPose:
         self.pose = self._pose_from_rail(
             self.pose_config.start_rail_m,
