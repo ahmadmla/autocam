@@ -139,6 +139,8 @@ class ControlRuntimeConfig:
     pan_goto_target_time_s: float
     pan_goto_speed_factor: float
     pan_goto_min_raw_speed: int
+    pan_goto_curve: str
+    pan_goto_log_raw_scale: float
     truck_kp_raw_per_px: float
     pan_error_filter_alpha: float
     pan_error_filter_tau_s: float
@@ -320,6 +322,29 @@ def load_runtime_config() -> RuntimeConfig:
         pan_goto_target_time_s=max(0.05, env_float("PAN_GOTO_TARGET_TIME_S", 0.35)),
         pan_goto_speed_factor=max(0.1, env_float("PAN_GOTO_SPEED_FACTOR", 1.0)),
         pan_goto_min_raw_speed=max(0, env_int("PAN_GOTO_MIN_RAW_SPEED", 2)),
+        pan_goto_curve=(
+            env_str(
+                "PAN_GOTO_CURVE",
+                env_str("MOTOR_MANUAL_PAN_GOTO_CURVE", env_str("MOTOR_MANUAL_GOTO_CURVE", "linear")),
+            )
+            .strip()
+            .lower()
+            if env_str(
+                "PAN_GOTO_CURVE",
+                env_str("MOTOR_MANUAL_PAN_GOTO_CURVE", env_str("MOTOR_MANUAL_GOTO_CURVE", "linear")),
+            )
+            .strip()
+            .lower()
+            in {"linear", "log"}
+            else "linear"
+        ),
+        pan_goto_log_raw_scale=max(
+            1.0,
+            env_float(
+                "PAN_GOTO_LOG_RAW_SCALE",
+                env_float("MOTOR_MANUAL_PAN_GOTO_LOG_RAW_SCALE", env_float("MOTOR_MANUAL_GOTO_LOG_RAW_SCALE", 80.0)),
+            ),
+        ),
         truck_kp_raw_per_px=env_float("TRUCK_KP_RAW_PER_PX", 0.08),
         pan_error_filter_alpha=env_float("PAN_ERROR_FILTER_ALPHA", 1.0),
         pan_error_filter_tau_s=env_float("PAN_ERROR_FILTER_TAU_S", 0.0),

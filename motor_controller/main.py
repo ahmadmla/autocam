@@ -125,6 +125,7 @@ class MotorControllerApp:
         self.pan_last_desired_bearing_deg: Optional[float] = None
         self.pan_last_bearing_monotonic: Optional[float] = None
         self.pan_velocity_filtered: Optional[float] = None
+        self.pan_frame_hold_locked = False
         self.truck_error_filtered = 0.0
         self.stationary_hold_lock: Optional[StationaryHoldLock] = None
         self.logical_pan_command = 0
@@ -386,6 +387,24 @@ class MotorControllerApp:
         step = max(float(ramp_raw_per_s) * max(dt_s, 0.0), 1.0)
         return int(round(clamp(float(target), current - step, current + step)))
 
+    def _ramp_pan_with_min(self, current: int, target: int, dt_s: float) -> int:
+        ramped = self._ramp_with_rate(
+            current,
+            target,
+            self.config.control.pan_command_ramp_raw_per_s,
+            dt_s,
+        )
+        min_raw = max(0, int(self.config.control.pan_goto_min_raw_speed))
+        if min_raw <= 0:
+            return ramped
+        if target == 0:
+            return 0 if abs(ramped) < min_raw else ramped
+        if ramped == 0:
+            return 0
+        if abs(ramped) < min_raw:
+            return self._sign(ramped) * min_raw
+        return ramped
+
     @staticmethod
     def _sign(value: int | float) -> int:
         if value > 0:
@@ -403,6 +422,7 @@ class MotorControllerApp:
         self.pan_last_desired_bearing_deg = None
         self.pan_last_bearing_monotonic = None
         self.pan_velocity_filtered = None
+        self.pan_frame_hold_locked = False
 
     def _reset_tracking_error_state(self) -> None:
         self._reset_pan_control_state()
@@ -566,12 +586,7 @@ class MotorControllerApp:
             -self.config.motor.pan_max_raw_speed,
             self.config.motor.pan_max_raw_speed,
         )))
-        pan_raw = self._ramp_with_rate(
-            self.logical_pan_command,
-            filtered_target,
-            self.config.control.pan_command_ramp_raw_per_s,
-            dt_s,
-        )
+        pan_raw = self._ramp_pan_with_min(self.logical_pan_command, filtered_target, dt_s)
         return pan_raw, "_BEARING_VELOCITY", desired_bearing_deg, pan_error_deg, bearing_rate_deg_s
 
     def _bearing_goto_pan_command(
@@ -597,7 +612,7 @@ class MotorControllerApp:
         if effective_error_deg <= 0.0:
             raw_target = 0.0
         else:
-            raw_abs = (
+            linear_raw_abs = (
                 self.config.control.pan_goto_speed_factor
                 * effective_error_deg
                 / max(
@@ -606,18 +621,18 @@ class MotorControllerApp:
                     1e-9,
                 )
             )
+            if self.config.control.pan_goto_curve == "log":
+                log_scale = max(1.0, self.config.control.pan_goto_log_raw_scale)
+                raw_abs = log_scale * math.log1p(linear_raw_abs / log_scale)
+            else:
+                raw_abs = linear_raw_abs
             raw_abs = max(float(self.config.control.pan_goto_min_raw_speed), raw_abs)
             raw_target = math.copysign(
                 min(raw_abs, float(self.config.motor.pan_max_raw_speed)),
                 pan_error_deg,
             )
 
-        pan_raw = self._ramp_with_rate(
-            self.logical_pan_command,
-            int(round(raw_target)),
-            self.config.control.pan_command_ramp_raw_per_s,
-            dt_s,
-        )
+        pan_raw = self._ramp_pan_with_min(self.logical_pan_command, int(round(raw_target)), dt_s)
         return pan_raw, "_BEARING_GOTO", desired_bearing_deg, pan_error_deg, bearing_rate_deg_s
 
     def _apply_pan_direction_hysteresis(self, desired_pan_raw: int, now: float) -> Tuple[int, str]:
@@ -803,6 +818,23 @@ class MotorControllerApp:
         margin = self.config.control.safe_image_margin_px
         return margin <= projected.x_px <= self.config.camera.image_w - margin
 
+    def _pan_frame_hold_active(self, error_x_px: Optional[float]) -> bool:
+        if error_x_px is None:
+            self.pan_frame_hold_locked = False
+            return False
+        if self.pan_frame_hold_locked:
+            escape_px = max(
+                self.config.control.pan_image_deadband_px,
+                self.config.control.pan_prealign_threshold_px,
+            )
+            if abs(error_x_px) <= escape_px:
+                return True
+            self.pan_frame_hold_locked = False
+        if abs(error_x_px) <= self.config.control.pan_image_deadband_px:
+            self.pan_frame_hold_locked = True
+            return True
+        return False
+
     def build_command(self, target: FilteredPoseMessage, now: float, dt_s: float) -> AxisCommand:
         camera_pose = self.pose_estimator.pose
         projected: Optional[ProjectedPoint]
@@ -848,6 +880,7 @@ class MotorControllerApp:
             )
 
         safe_horizontal_envelope = bool(projected is not None and self._safe_horizontal_envelope(projected))
+        pan_frame_hold_active = projection_valid and self._pan_frame_hold_active(error_x)
 
         pan_enabled = self.config.motor.pan_enabled
         truck_enabled = self.config.motor.truck_enabled
@@ -856,13 +889,8 @@ class MotorControllerApp:
 
         if self.config.control.pan_control_mode == "BEARING_GOTO":
             filtered_error_x = error_x or 0.0
-            if projection_valid and error_x is not None and abs(error_x) <= self.config.control.pan_image_deadband_px:
-                pan_raw = self._ramp_with_rate(
-                    self.logical_pan_command,
-                    0,
-                    self.config.control.pan_command_ramp_raw_per_s,
-                    dt_s,
-                )
+            if pan_frame_hold_active:
+                pan_raw = self._ramp_pan_with_min(self.logical_pan_command, 0, dt_s)
                 pan_hold_mode = "_FRAME_HOLD"
                 bearing_rate_deg_s = 0.0
             else:
@@ -876,13 +904,8 @@ class MotorControllerApp:
             pan_already_ramped = True
         elif self.config.control.pan_control_mode == "BEARING_VELOCITY":
             filtered_error_x = error_x or 0.0
-            if projection_valid and error_x is not None and abs(error_x) <= self.config.control.pan_image_deadband_px:
-                pan_raw = self._ramp_with_rate(
-                    self.logical_pan_command,
-                    0,
-                    self.config.control.pan_command_ramp_raw_per_s,
-                    dt_s,
-                )
+            if pan_frame_hold_active:
+                pan_raw = self._ramp_pan_with_min(self.logical_pan_command, 0, dt_s)
                 pan_hold_mode = "_FRAME_HOLD"
                 bearing_rate_deg_s = 0.0
             else:
@@ -1344,6 +1367,7 @@ class MotorControllerApp:
                 "actual_logical_pan_raw": self.latest_actual_pan_raw,
                 "actual_logical_truck_raw": self.latest_actual_truck_raw,
                 "stationary_hold_active": self.stationary_hold_lock is not None,
+                "pan_frame_hold_active": self.pan_frame_hold_locked,
                 "hold_distance_m": hold_distance_m,
                 "pan_bearing_deadband_deg": self.config.control.pan_bearing_deadband_deg,
                 "stationary_hold_pan_window_px": self.config.control.stationary_hold_pan_window_px,
@@ -1504,7 +1528,7 @@ def main() -> None:
         "rail_limits=(%.3f,%.3f) rail_soft_margin=%.3f control_hz=%.1f status_poll_s=%.3f log_interval_s=%.3f "
         "pan_mode=%s pan_max=%s pan_deadband=%.1f pan_kp=%.3f pan_bearing_kp=%.3f pan_bearing_kd=%.3f "
         "pan_bearing_deadband=%.2f pan_velocity_filter_tau=%.3f pan_command_ramp=%.1f "
-        "pan_goto_target_time=%.3f pan_goto_speed_factor=%.2f pan_goto_min_raw=%s "
+        "pan_goto_target_time=%.3f pan_goto_speed_factor=%.2f pan_goto_min_raw=%s pan_goto_curve=%s pan_goto_log_raw_scale=%.1f "
         "pan_ramp=%.1f pan_filter_tau=%.3f pan_flip_hold_ms=%.0f pan_center_hold_ms=%.0f "
         "stationary_hold=%s stationary_hold_min_q=%.2f stationary_hold_window_px=%.1f "
         "stationary_hold_escape_px=%.1f stationary_hold_room_radius_m=%.3f",
@@ -1542,6 +1566,8 @@ def main() -> None:
         config.control.pan_goto_target_time_s,
         config.control.pan_goto_speed_factor,
         config.control.pan_goto_min_raw_speed,
+        config.control.pan_goto_curve,
+        config.control.pan_goto_log_raw_scale,
         config.motor.pan_ramp_raw_per_s,
         config.control.pan_error_filter_tau_s,
         config.control.pan_direction_flip_hold_ms,
