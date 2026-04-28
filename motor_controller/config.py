@@ -104,6 +104,8 @@ class MotorRuntimeConfig:
     pan_sign: int
     truck_sign: int
     pan_deg_per_raw_speed_s: float
+    pan_small_move_estimation_threshold_deg: float
+    pan_small_move_deg_per_raw_speed_s: float
     truck_m_per_raw_speed_s: float
     ramp_raw_per_s: float
     pan_ramp_raw_per_s: float
@@ -294,6 +296,17 @@ def load_runtime_config() -> RuntimeConfig:
         pan_deg_per_raw_speed_s=env_float(
             "PAN_DEG_PER_RAW_SPEED_S",
             env_float("MOTOR_MANUAL_PAN_DEG_PER_RAW_SPEED_S", 0.01),
+        ),
+        pan_small_move_estimation_threshold_deg=max(
+            0.0,
+            env_float("PAN_SMALL_MOVE_ESTIMATION_THRESHOLD_DEG", 0.0),
+        ),
+        pan_small_move_deg_per_raw_speed_s=env_float(
+            "PAN_SMALL_MOVE_DEG_PER_RAW_SPEED_S",
+            env_float(
+                "PAN_DEG_PER_RAW_SPEED_S",
+                env_float("MOTOR_MANUAL_PAN_DEG_PER_RAW_SPEED_S", 0.01),
+            ),
         ),
         truck_m_per_raw_speed_s=env_float("TRUCK_M_PER_RAW_SPEED_S", 0.00005),
         ramp_raw_per_s=ramp_raw_per_s,

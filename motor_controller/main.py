@@ -150,6 +150,7 @@ class MotorControllerApp:
         self.pan_center_hold_until_monotonic: Optional[float] = None
         self.pan_last_desired_bearing_deg: Optional[float] = None
         self.pan_last_bearing_monotonic: Optional[float] = None
+        self.pan_estimation_deg_per_raw_speed_s = config.motor.pan_deg_per_raw_speed_s
         self.pan_velocity_filtered: Optional[float] = None
         self.pan_frame_hold_locked = False
         self.truck_error_filtered = 0.0
@@ -640,6 +641,12 @@ class MotorControllerApp:
         desired_bearing_deg = self._desired_bearing_deg(camera_pose, target)
         return desired_bearing_deg, desired_bearing_deg - self._target_image_x_angle_offset_deg()
 
+    def _pan_estimation_units_for_error(self, pan_error_deg: float) -> float:
+        threshold_deg = self.config.motor.pan_small_move_estimation_threshold_deg
+        if threshold_deg > 0.0 and abs(float(pan_error_deg)) < threshold_deg:
+            return self.config.motor.pan_small_move_deg_per_raw_speed_s
+        return self.config.motor.pan_deg_per_raw_speed_s
+
     def _bearing_velocity_pan_command(
         self,
         target: FilteredPoseMessage,
@@ -688,6 +695,7 @@ class MotorControllerApp:
             self.config.motor.pan_max_raw_speed,
         )))
         pan_raw = self._ramp_pan_with_min(self.logical_pan_command, filtered_target, dt_s)
+        self.pan_estimation_deg_per_raw_speed_s = self._pan_estimation_units_for_error(pan_error_deg)
         return pan_raw, "_BEARING_VELOCITY", desired_bearing_deg, pan_error_deg, bearing_rate_deg_s
 
     def _bearing_goto_pan_command(
@@ -734,6 +742,7 @@ class MotorControllerApp:
             )
 
         pan_raw = self._ramp_pan_with_min(self.logical_pan_command, int(round(raw_target)), dt_s)
+        self.pan_estimation_deg_per_raw_speed_s = self._pan_estimation_units_for_error(pan_error_deg)
         return pan_raw, "_BEARING_GOTO", desired_bearing_deg, pan_error_deg, bearing_rate_deg_s
 
     def _apply_pan_direction_hysteresis(self, desired_pan_raw: int, now: float) -> Tuple[int, str]:
@@ -794,7 +803,12 @@ class MotorControllerApp:
             actual_pan_raw, actual_truck_raw = self._logical_actual_speeds(statuses)
             self.latest_actual_pan_raw = actual_pan_raw
             self.latest_actual_truck_raw = actual_truck_raw
-            self.pose_estimator.update(dt_s, actual_pan_raw, actual_truck_raw)
+            self.pose_estimator.update(
+                dt_s,
+                actual_pan_raw,
+                actual_truck_raw,
+                pan_deg_per_raw_speed_s=self.pan_estimation_deg_per_raw_speed_s,
+            )
             self._enforce_soft_limits_immediately()
         return statuses
 
@@ -1656,6 +1670,8 @@ class MotorControllerApp:
                 "cmd_driver_truck": self.driver_truck_command,
                 "actual_logical_pan_raw": self.latest_actual_pan_raw,
                 "actual_logical_truck_raw": self.latest_actual_truck_raw,
+                "pan_estimation_deg_per_raw_speed_s": self.pan_estimation_deg_per_raw_speed_s,
+                "pan_small_move_estimation_threshold_deg": self.config.motor.pan_small_move_estimation_threshold_deg,
                 "truck_control_mode": command.truck_control_mode,
                 "room_y_min_m": command.room_y_min_m,
                 "room_y_max_m": command.room_y_max_m,
@@ -1838,6 +1854,7 @@ def main() -> None:
         "motor_controller=start live=%s debug=%s selected=%s camera=%s %sx%s pan_enabled=%s truck_enabled=%s "
         "pan_motor=%s pan_driver=%s truck_motor=%s truck_driver=%s rail_origin=(%.3f,%.3f) rail_heading_deg=%.2f start_rail_m=%.3f "
         "rail_limits=(%.3f,%.3f) rail_soft_margin=%.3f control_hz=%.1f status_poll_s=%.3f log_interval_s=%.3f "
+        "pan_units=%.3f pan_small_move_units=%.3f pan_small_move_threshold_deg=%.1f "
         "pan_mode=%s pan_max=%s pan_deadband=%.1f pan_kp=%.3f pan_bearing_kp=%.3f pan_bearing_kd=%.3f "
         "pan_bearing_deadband=%.2f pan_velocity_filter_tau=%.3f pan_command_ramp=%.1f "
         "pan_goto_target_time=%.3f pan_goto_speed_factor=%.2f pan_goto_min_raw=%s pan_goto_curve=%s pan_goto_log_raw_scale=%.1f "
@@ -1870,6 +1887,9 @@ def main() -> None:
         config.control.control_hz,
         config.control.status_poll_s,
         config.control.log_interval_s,
+        config.motor.pan_deg_per_raw_speed_s,
+        config.motor.pan_small_move_deg_per_raw_speed_s,
+        config.motor.pan_small_move_estimation_threshold_deg,
         config.control.pan_control_mode,
         config.motor.pan_max_raw_speed,
         config.control.pan_image_deadband_px,

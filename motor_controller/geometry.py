@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Optional, Tuple
 
 from .config import CameraIntrinsics, CameraPoseConfig, MotorRuntimeConfig
 
@@ -165,13 +165,24 @@ class CameraPoseEstimator:
     def invalidate(self) -> None:
         self.valid = False
 
-    def update(self, dt_s: float, logical_pan_raw: float, logical_truck_raw: float) -> EstimatedCameraPose:
+    def update(
+        self,
+        dt_s: float,
+        logical_pan_raw: float,
+        logical_truck_raw: float,
+        pan_deg_per_raw_speed_s: Optional[float] = None,
+    ) -> EstimatedCameraPose:
         if not self.valid:
             return self.pose
         dt = clamp(float(dt_s), 0.0, 2.0)
         if self.motor_config.pan_enabled:
+            pan_units = (
+                self.motor_config.pan_deg_per_raw_speed_s
+                if pan_deg_per_raw_speed_s is None
+                else float(pan_deg_per_raw_speed_s)
+            )
             next_pan = clamp(
-                self.pose.pan_deg + logical_pan_raw * self.motor_config.pan_deg_per_raw_speed_s * dt,
+                self.pose.pan_deg + logical_pan_raw * pan_units * dt,
                 self.motor_config.pan_min_deg,
                 self.motor_config.pan_max_deg,
             )
