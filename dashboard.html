@@ -1009,7 +1009,7 @@
       const targetY = Number(camera?.target_y_px ?? imageH / 2);
       const targetFrameX = clamp(targetX * scaleX, 0, 480);
       const targetFrameY = clamp(targetY * scaleY, 0, 270);
-      const holdWindowPx = Number(control?.stationary_hold_pan_window_px);
+      const holdWindowPx = Number(control?.effective_stationary_hold_pan_window_px ?? control?.stationary_hold_pan_window_px);
       const holdRect = Number.isFinite(holdWindowPx)
         ? `<rect x="${clamp((targetX - holdWindowPx) * scaleX, 0, 480)}" y="0" width="${clamp((holdWindowPx * 2) * scaleX, 0, 480)}" height="270" fill="#22c55e" fill-opacity="0.10" />`
         : '';
@@ -1021,6 +1021,7 @@
       const pan = motorState?.pose_estimate?.pan_deg;
       const bearing = control?.desired_bearing_deg;
       const err = projection?.error_x_px;
+      const depth = projection?.depth_m;
 
       cameraFrame.innerHTML = `
         <rect x="0" y="0" width="480" height="270" fill="#0f172a" />
@@ -1031,7 +1032,7 @@
         ${projectedDot}
         <rect x="12" y="12" width="456" height="52" rx="8" fill="#020617" fill-opacity="0.72" />
         <text x="24" y="34" font-size="14" fill="#e5e7eb">${esc(mode)}</text>
-        <text x="24" y="54" font-size="12" fill="#94a3b8">pan ${fmt(pan, 2, ' deg')} | bearing ${fmt(bearing, 2, ' deg')} | err ${fmt(err, 1, ' px')}</text>
+        <text x="24" y="54" font-size="12" fill="#94a3b8">pan ${fmt(pan, 2, ' deg')} | bearing ${fmt(bearing, 2, ' deg')} | err ${fmt(err, 1, ' px')} | depth ${fmt(depth, 2, ' m')} | window ${fmt(holdWindowPx, 0, ' px')}</text>
       `;
     }
 

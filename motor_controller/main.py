@@ -468,10 +468,31 @@ class MotorControllerApp:
             _format_optional_float(target.stationary_confidence),
         )
 
-    def _stationary_hold_active(self, target: FilteredPoseMessage, error_x_px: float, now: float) -> bool:
+    def _depth_scaled_px(self, base_px: float, depth_m: Optional[float]) -> float:
+        if not self.config.control.pan_depth_window_scaling_enabled:
+            return base_px
+        if depth_m is None or not math.isfinite(depth_m) or depth_m <= 1e-6:
+            return base_px
+        scale = self.config.control.pan_depth_reference_m / depth_m
+        scale = clamp(
+            scale,
+            self.config.control.pan_depth_scale_min,
+            self.config.control.pan_depth_scale_max,
+        )
+        return base_px * scale
+
+    def _stationary_hold_active(
+        self,
+        target: FilteredPoseMessage,
+        error_x_px: float,
+        now: float,
+        depth_m: Optional[float],
+    ) -> bool:
         if not self.config.control.stationary_hold_enabled:
             self._clear_stationary_hold("disabled")
             return False
+        hold_window_px = self._depth_scaled_px(self.config.control.stationary_hold_pan_window_px, depth_m)
+        escape_window_px = self._depth_scaled_px(self.config.control.stationary_hold_escape_window_px, depth_m)
 
         lock = self.stationary_hold_lock
         if lock is not None:
@@ -490,7 +511,7 @@ class MotorControllerApp:
             if distance_m is None or distance_m > self.config.control.stationary_hold_room_radius_m:
                 self._clear_stationary_hold("room_motion")
                 return False
-            if abs(error_x_px) > self.config.control.stationary_hold_escape_window_px:
+            if abs(error_x_px) > escape_window_px:
                 self._clear_stationary_hold("image_escape")
                 return False
             return True
@@ -498,7 +519,7 @@ class MotorControllerApp:
         can_acquire = (
             self._target_stationary_for_hold(target)
             and target.quality_score >= self.config.control.stationary_hold_min_quality
-            and abs(error_x_px) <= self.config.control.stationary_hold_pan_window_px
+            and abs(error_x_px) <= hold_window_px
         )
         if can_acquire:
             self._enter_stationary_hold(target, error_x_px, now)
@@ -818,19 +839,21 @@ class MotorControllerApp:
         margin = self.config.control.safe_image_margin_px
         return margin <= projected.x_px <= self.config.camera.image_w - margin
 
-    def _pan_frame_hold_active(self, error_x_px: Optional[float]) -> bool:
+    def _pan_frame_hold_active(self, error_x_px: Optional[float], depth_m: Optional[float]) -> bool:
         if error_x_px is None:
             self.pan_frame_hold_locked = False
             return False
+        deadband_px = self._depth_scaled_px(self.config.control.pan_image_deadband_px, depth_m)
+        prealign_px = self._depth_scaled_px(self.config.control.pan_prealign_threshold_px, depth_m)
         if self.pan_frame_hold_locked:
             escape_px = max(
-                self.config.control.pan_image_deadband_px,
-                self.config.control.pan_prealign_threshold_px,
+                deadband_px,
+                prealign_px,
             )
             if abs(error_x_px) <= escape_px:
                 return True
             self.pan_frame_hold_locked = False
-        if abs(error_x_px) <= self.config.control.pan_image_deadband_px:
+        if abs(error_x_px) <= deadband_px:
             self.pan_frame_hold_locked = True
             return True
         return False
@@ -864,7 +887,12 @@ class MotorControllerApp:
         stationary_hold_active = (
             projection_valid
             and error_x is not None
-            and self._stationary_hold_active(target, error_x, now)
+            and self._stationary_hold_active(
+                target,
+                error_x,
+                now,
+                projected.depth_m if projected is not None else None,
+            )
         )
         if stationary_hold_active:
             return AxisCommand(
@@ -880,7 +908,10 @@ class MotorControllerApp:
             )
 
         safe_horizontal_envelope = bool(projected is not None and self._safe_horizontal_envelope(projected))
-        pan_frame_hold_active = projection_valid and self._pan_frame_hold_active(error_x)
+        pan_frame_hold_active = projection_valid and self._pan_frame_hold_active(
+            error_x,
+            projected.depth_m if projected is not None else None,
+        )
 
         pan_enabled = self.config.motor.pan_enabled
         truck_enabled = self.config.motor.truck_enabled
@@ -1305,6 +1336,23 @@ class MotorControllerApp:
         pose = self.pose_estimator.pose
         target_x, target_y = self.target_image_center()
         hold_distance_m = self._stationary_hold_distance_m(target) if target is not None else None
+        projection_depth_m = command.projected.depth_m if command.projected is not None else None
+        effective_pan_deadband_px = self._depth_scaled_px(
+            self.config.control.pan_image_deadband_px,
+            projection_depth_m,
+        )
+        effective_pan_escape_px = self._depth_scaled_px(
+            self.config.control.pan_prealign_threshold_px,
+            projection_depth_m,
+        )
+        effective_stationary_window_px = self._depth_scaled_px(
+            self.config.control.stationary_hold_pan_window_px,
+            projection_depth_m,
+        )
+        effective_stationary_escape_px = self._depth_scaled_px(
+            self.config.control.stationary_hold_escape_window_px,
+            projection_depth_m,
+        )
         target_payload = None
         if target is not None:
             target_payload = {
@@ -1372,6 +1420,14 @@ class MotorControllerApp:
                 "pan_bearing_deadband_deg": self.config.control.pan_bearing_deadband_deg,
                 "stationary_hold_pan_window_px": self.config.control.stationary_hold_pan_window_px,
                 "stationary_hold_min_quality": self.config.control.stationary_hold_min_quality,
+                "pan_depth_window_scaling_enabled": self.config.control.pan_depth_window_scaling_enabled,
+                "pan_depth_reference_m": self.config.control.pan_depth_reference_m,
+                "pan_depth_scale_min": self.config.control.pan_depth_scale_min,
+                "pan_depth_scale_max": self.config.control.pan_depth_scale_max,
+                "effective_pan_deadband_px": effective_pan_deadband_px,
+                "effective_pan_escape_px": effective_pan_escape_px,
+                "effective_stationary_hold_pan_window_px": effective_stationary_window_px,
+                "effective_stationary_hold_escape_window_px": effective_stationary_escape_px,
             },
         }
 

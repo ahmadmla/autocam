@@ -128,6 +128,10 @@ class ControlRuntimeConfig:
     pan_prealign_threshold_px: float
     pan_centered_threshold_px: float
     truck_enable_after_pan_centered_ms: float
+    pan_depth_window_scaling_enabled: bool
+    pan_depth_reference_m: float
+    pan_depth_scale_min: float
+    pan_depth_scale_max: float
     pan_control_mode: str
     pan_kp_raw_per_px: float
     pan_bearing_deadband_deg: float
@@ -311,6 +315,10 @@ def load_runtime_config() -> RuntimeConfig:
         pan_prealign_threshold_px=env_float("PAN_PREALIGN_THRESHOLD_PX", 160.0),
         pan_centered_threshold_px=env_float("PAN_CENTERED_THRESHOLD_PX", 60.0),
         truck_enable_after_pan_centered_ms=env_float("TRUCK_ENABLE_AFTER_PAN_CENTERED_MS", 500.0),
+        pan_depth_window_scaling_enabled=env_bool("PAN_DEPTH_WINDOW_SCALING_ENABLED", False),
+        pan_depth_reference_m=max(0.1, env_float("PAN_DEPTH_REFERENCE_M", 2.0)),
+        pan_depth_scale_min=max(0.1, env_float("PAN_DEPTH_SCALE_MIN", 0.45)),
+        pan_depth_scale_max=max(0.1, env_float("PAN_DEPTH_SCALE_MAX", 1.6)),
         pan_control_mode=env_str("PAN_CONTROL_MODE", "BEARING_VELOCITY").strip().upper(),
         pan_kp_raw_per_px=env_float("PAN_KP_RAW_PER_PX", 0.45),
         pan_bearing_deadband_deg=env_float("PAN_BEARING_DEADBAND_DEG", 2.0),
