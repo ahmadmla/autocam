@@ -437,6 +437,51 @@ class MotorControllerApp:
             return self._sign(ramped) * min_raw
         return ramped
 
+    def _ramp_truck_with_min(self, current: int, target: int, dt_s: float) -> int:
+        ramped = self._ramp_with_rate(
+            current,
+            target,
+            self.config.control.truck_command_ramp_raw_per_s,
+            dt_s,
+        )
+        min_raw = max(0, int(self.config.control.truck_goto_min_raw_speed))
+        if min_raw <= 0:
+            return ramped
+        if target == 0:
+            return 0 if abs(ramped) < min_raw else ramped
+        if ramped == 0:
+            return 0
+        if abs(ramped) < min_raw:
+            return self._sign(ramped) * min_raw
+        return ramped
+
+    def _truck_goto_raw_from_rail_error(self, rail_error_m: float, dt_s: float) -> int:
+        tolerance_m = max(0.0, self.config.control.truck_rail_deadband_m)
+        effective_error_m = max(0.0, abs(rail_error_m) - tolerance_m)
+        if effective_error_m <= 0.0:
+            raw_target = 0.0
+        else:
+            linear_raw_abs = (
+                self.config.control.truck_goto_speed_factor
+                * effective_error_m
+                / max(
+                    self.config.motor.truck_m_per_raw_speed_s
+                    * self.config.control.truck_goto_target_time_s,
+                    1e-9,
+                )
+            )
+            if self.config.control.truck_goto_curve == "log":
+                log_scale = max(1.0, self.config.control.truck_goto_log_raw_scale)
+                raw_abs = log_scale * math.log1p(linear_raw_abs / log_scale)
+            else:
+                raw_abs = linear_raw_abs
+            raw_abs = max(float(self.config.control.truck_goto_min_raw_speed), raw_abs)
+            raw_target = math.copysign(
+                min(raw_abs, float(self.config.motor.truck_max_raw_speed)),
+                rail_error_m,
+            )
+        return self._ramp_truck_with_min(self.logical_truck_command, int(round(raw_target)), dt_s)
+
     @staticmethod
     def _sign(value: int | float) -> int:
         if value > 0:
@@ -938,7 +983,9 @@ class MotorControllerApp:
         self.truck_rail_target_committed = committed_rail
 
         rail_error = committed_rail - current_rail
-        if abs(rail_error) <= self.config.control.truck_rail_deadband_m:
+        if self.config.control.truck_control_mode == "ROOM_Y_GOTO":
+            raw_command = self._truck_goto_raw_from_rail_error(rail_error, dt_s)
+        elif abs(rail_error) <= self.config.control.truck_rail_deadband_m:
             raw_command = 0
         else:
             raw_command = int(round(clamp(
@@ -984,10 +1031,14 @@ class MotorControllerApp:
     def build_command(self, target: FilteredPoseMessage, now: float, dt_s: float) -> AxisCommand:
         actual_camera_pose = self.pose_estimator.pose
         room_y_mode = (
-            self.config.control.truck_control_mode == "ROOM_Y_POSITION"
+            self.config.control.truck_control_mode in {"ROOM_Y_POSITION", "ROOM_Y_GOTO"}
             and self.config.motor.truck_enabled
         )
         room_y_plan = self._room_y_truck_plan(target, dt_s) if room_y_mode else None
+        truck_already_ramped = (
+            room_y_plan is not None
+            and self.config.control.truck_control_mode == "ROOM_Y_GOTO"
+        )
         camera_pose: EstimatedCameraPose = actual_camera_pose
         if room_y_plan is not None:
             camera_pose = self.pose_estimator.pose_at_rail(
@@ -1035,7 +1086,7 @@ class MotorControllerApp:
             if truck_blocked:
                 truck_raw = 0
                 mode += "_TRUCK_SOFT_LIMIT"
-            if room_y_plan is not None and not truck_blocked:
+            if room_y_plan is not None and not truck_blocked and not truck_already_ramped:
                 truck_raw = self._ramp_axis("truck", self.logical_truck_command, truck_raw, dt_s)
             return self._command_with_room_y_metadata(AxisCommand(
                 pan_raw=0,
@@ -1116,7 +1167,8 @@ class MotorControllerApp:
                 truck_raw = 0
                 mode += "_TRUCK_SOFT_LIMIT"
             if room_y_plan is not None and not truck_blocked:
-                truck_raw = self._ramp_axis("truck", self.logical_truck_command, truck_raw, dt_s)
+                if not truck_already_ramped:
+                    truck_raw = self._ramp_axis("truck", self.logical_truck_command, truck_raw, dt_s)
                 mode += "_ROOM_Y_TRUCK"
             return self._command_with_room_y_metadata(AxisCommand(
                 pan_raw=pan_raw,
@@ -1172,7 +1224,7 @@ class MotorControllerApp:
             if truck_blocked:
                 truck_raw = 0
                 mode += "_TRUCK_SOFT_LIMIT"
-            if not truck_blocked:
+            if not truck_blocked and not truck_already_ramped:
                 truck_raw = self._ramp_axis("truck", self.logical_truck_command, truck_raw, dt_s)
             return self._command_with_room_y_metadata(AxisCommand(
                 pan_raw=0,
@@ -1244,7 +1296,7 @@ class MotorControllerApp:
 
         if not pan_blocked and not pan_already_ramped:
             pan_raw = self._ramp_axis("pan", self.logical_pan_command, pan_raw, dt_s)
-        if not truck_blocked:
+        if not truck_blocked and not truck_already_ramped:
             truck_raw = self._ramp_axis("truck", self.logical_truck_command, truck_raw, dt_s)
         return self._command_with_room_y_metadata(AxisCommand(
             pan_raw=pan_raw,
@@ -1788,6 +1840,8 @@ def main() -> None:
         "pan_goto_target_time=%.3f pan_goto_speed_factor=%.2f pan_goto_min_raw=%s pan_goto_curve=%s pan_goto_log_raw_scale=%.1f "
         "truck_control_mode=%s truck_rail_kp=%.1f truck_rail_deadband=%.3f truck_room_y_invert=%s truck_pan_lookahead=%.2f "
         "truck_rail_filter_tau=%.2f truck_rail_update_deadband=%.3f "
+        "truck_goto_target_time=%.3f truck_goto_speed_factor=%.2f truck_goto_min_raw=%s truck_goto_curve=%s "
+        "truck_goto_log_raw_scale=%.1f truck_command_ramp=%.1f "
         "pan_ramp=%.1f pan_filter_tau=%.3f pan_flip_hold_ms=%.0f pan_center_hold_ms=%.0f "
         "stationary_hold=%s stationary_hold_min_q=%.2f stationary_hold_window_px=%.1f "
         "stationary_hold_escape_px=%.1f stationary_hold_room_radius_m=%.3f",
@@ -1834,6 +1888,12 @@ def main() -> None:
         config.control.truck_pan_lookahead_fraction,
         config.control.truck_rail_target_filter_tau_s,
         config.control.truck_rail_target_update_deadband_m,
+        config.control.truck_goto_target_time_s,
+        config.control.truck_goto_speed_factor,
+        config.control.truck_goto_min_raw_speed,
+        config.control.truck_goto_curve,
+        config.control.truck_goto_log_raw_scale,
+        config.control.truck_command_ramp_raw_per_s,
         config.motor.pan_ramp_raw_per_s,
         config.control.pan_error_filter_tau_s,
         config.control.pan_direction_flip_hold_ms,

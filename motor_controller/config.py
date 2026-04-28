@@ -157,6 +157,12 @@ class ControlRuntimeConfig:
     truck_pan_lookahead_fraction: float
     truck_rail_target_filter_tau_s: float
     truck_rail_target_update_deadband_m: float
+    truck_goto_target_time_s: float
+    truck_goto_speed_factor: float
+    truck_goto_min_raw_speed: int
+    truck_goto_curve: str
+    truck_goto_log_raw_scale: float
+    truck_command_ramp_raw_per_s: float
     pan_error_filter_alpha: float
     pan_error_filter_tau_s: float
     pan_direction_flip_hold_ms: float
@@ -366,7 +372,7 @@ def load_runtime_config() -> RuntimeConfig:
         ),
         truck_control_mode=(
             env_str("TRUCK_CONTROL_MODE", "IMAGE_ERROR").strip().upper()
-            if env_str("TRUCK_CONTROL_MODE", "IMAGE_ERROR").strip().upper() in {"IMAGE_ERROR", "ROOM_Y_POSITION"}
+            if env_str("TRUCK_CONTROL_MODE", "IMAGE_ERROR").strip().upper() in {"IMAGE_ERROR", "ROOM_Y_POSITION", "ROOM_Y_GOTO"}
             else "IMAGE_ERROR"
         ),
         truck_kp_raw_per_px=env_float("TRUCK_KP_RAW_PER_PX", 0.08),
@@ -376,6 +382,16 @@ def load_runtime_config() -> RuntimeConfig:
         truck_pan_lookahead_fraction=clamp(env_float("TRUCK_PAN_LOOKAHEAD_FRACTION", 0.5), 0.0, 1.0),
         truck_rail_target_filter_tau_s=max(0.0, env_float("TRUCK_RAIL_TARGET_FILTER_TAU_S", 0.50)),
         truck_rail_target_update_deadband_m=max(0.0, env_float("TRUCK_RAIL_TARGET_UPDATE_DEADBAND_M", 0.03)),
+        truck_goto_target_time_s=max(0.05, env_float("TRUCK_GOTO_TARGET_TIME_S", 0.35)),
+        truck_goto_speed_factor=max(0.1, env_float("TRUCK_GOTO_SPEED_FACTOR", 1.0)),
+        truck_goto_min_raw_speed=max(0, env_int("TRUCK_GOTO_MIN_RAW_SPEED", 2)),
+        truck_goto_curve=(
+            env_str("TRUCK_GOTO_CURVE", "linear").strip().lower()
+            if env_str("TRUCK_GOTO_CURVE", "linear").strip().lower() in {"linear", "log"}
+            else "linear"
+        ),
+        truck_goto_log_raw_scale=max(1.0, env_float("TRUCK_GOTO_LOG_RAW_SCALE", 80.0)),
+        truck_command_ramp_raw_per_s=env_float("TRUCK_COMMAND_RAMP_RAW_PER_S", max(motor.truck_ramp_raw_per_s, 120.0)),
         pan_error_filter_alpha=env_float("PAN_ERROR_FILTER_ALPHA", 1.0),
         pan_error_filter_tau_s=env_float("PAN_ERROR_FILTER_TAU_S", 0.0),
         pan_direction_flip_hold_ms=env_float("PAN_DIRECTION_FLIP_HOLD_MS", 0.0),
