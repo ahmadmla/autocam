@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import signal
 import subprocess
@@ -19,6 +20,36 @@ REPO_NAME = REPO_ROOT.name
 SERVER_ROOT = REPO_ROOT.parent
 
 load_repo_env()
+
+try:
+    import paho.mqtt.client as mqtt
+except ImportError:  # pragma: no cover
+    mqtt = None
+
+
+def env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value in (None, ""):
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value in (None, ""):
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def env_str(name: str, default: str) -> str:
+    value = os.getenv(name)
+    return value if value not in (None, "") else default
 
 
 @dataclass
@@ -150,6 +181,57 @@ def terminate_all(processes: List[ManagedProcess]) -> None:
         kill_process(managed)
 
 
+def publish_shutdown_home() -> bool:
+    wait_s = max(0.0, env_float("SHUTDOWN_RECENTER_WAIT_S", 8.0))
+    if wait_s <= 0.0:
+        print("[launcher] shutdown recenter skipped wait=0", flush=True)
+        return False
+    if mqtt is None:
+        print("[launcher] shutdown recenter skipped reason=paho_mqtt_missing", flush=True)
+        return False
+
+    host = env_str("MQTT_HOST", "127.0.0.1")
+    port = env_int("MQTT_PORT", 1883)
+    qos = env_int("MQTT_QOS", 0)
+    topic = env_str("AUTOCAM_TARGET_SELECT_TOPIC", "autocam/target/select")
+    payload = {
+        "node_id": "__center__",
+        "actor": "Center",
+        "source": "launcher_shutdown",
+        "slot_token": f"shutdown-{int(time.time() * 1000)}",
+        "home": True,
+        "ts": time.time(),
+    }
+    try:
+        try:
+            client = mqtt.Client(
+                mqtt.CallbackAPIVersion.VERSION2,
+                client_id="autocam_launcher_shutdown",
+            )
+        except AttributeError:
+            client = mqtt.Client(client_id="autocam_launcher_shutdown")
+        client.connect(host, port, keepalive=10)
+        client.loop_start()
+        result = client.publish(
+            topic,
+            json.dumps(payload, separators=(",", ":"), allow_nan=False),
+            qos=qos,
+            retain=True,
+        )
+        result.wait_for_publish(timeout=2.0)
+        client.loop_stop()
+        client.disconnect()
+        print(
+            f"[launcher] shutdown recenter published topic={topic} wait={wait_s:.1f}s",
+            flush=True,
+        )
+        time.sleep(wait_s)
+        return True
+    except Exception as exc:
+        print(f"[launcher] shutdown recenter failed detail={exc}", flush=True)
+        return False
+
+
 def serve_http(http_port: int, verbose: bool, stop_event: threading.Event) -> None:
     handler_cls = SimpleHTTPRequestHandler if verbose else QuietHttpRequestHandler
     handler = partial(handler_cls, directory=str(SERVER_ROOT))
@@ -264,6 +346,8 @@ def main() -> int:
             time.sleep(0.20)
     finally:
         server_stop_event.set()
+        if not args.skip_motor_controller:
+            publish_shutdown_home()
         terminate_all(processes)
         if server_thread is not None:
             server_thread.join(timeout=1.0)
