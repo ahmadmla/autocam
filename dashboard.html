@@ -176,6 +176,62 @@
       gap: 10px;
     }
 
+    .script-list {
+      display: grid;
+      gap: 10px;
+      max-height: 520px;
+      overflow: auto;
+      padding-right: 4px;
+    }
+
+    .script-cue {
+      border: 1px solid var(--line);
+      border-left: 4px solid #d1d5db;
+      border-radius: 12px;
+      padding: 11px 12px;
+      background: #fafafa;
+      display: grid;
+      gap: 6px;
+      opacity: 0.58;
+    }
+
+    .script-cue.active {
+      border-left-color: var(--danger);
+      background: #fff7ed;
+      opacity: 1;
+    }
+
+    .script-cue.done {
+      opacity: 0.38;
+    }
+
+    .script-cue.center-cue {
+      border-left-color: #111827;
+      background: #f3f4f6;
+    }
+
+    .script-actor {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 13px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .script-lines {
+      font-size: 14px;
+      line-height: 1.48;
+      color: #374151;
+    }
+
+    .script-trigger {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
     .audio-actor {
       font-size: 28px;
       font-weight: 800;
@@ -302,9 +358,30 @@
           <div><span class="dot" style="background:#111827"></span>Camera estimate</div>
         </div>
         <div id="nodeLegend" class="node-legend"></div>
+
+        <div class="section-title">Camera view estimate</div>
+        <svg id="cameraFrame" class="camera-frame" viewBox="0 0 480 270" aria-label="Estimated camera frame"></svg>
       </div>
 
       <div class="card">
+        <div class="section-title" style="margin-top:0;">Audio cue scene</div>
+        <div id="audioCue" class="audio-cue">
+          <div class="audio-cue-row">
+            <span id="audioStatusPill" class="pill">audio waiting</span>
+            <span id="audioCueCount" class="helper mono">cue n/a</span>
+          </div>
+          <div id="audioActorOut" class="audio-actor">n/a</div>
+          <div class="helper mono">node: <span id="audioNodeOut">n/a</span></div>
+          <div class="helper">Next: <span id="audioNextOut">n/a</span></div>
+          <div class="helper">Last trigger: <span id="audioTriggerOut">n/a</span></div>
+          <div id="audioTranscripts" class="transcript-list"></div>
+        </div>
+
+        <div class="section-title">Script</div>
+        <div id="audioScript" class="script-list">
+          <div class="empty">Waiting for scene.</div>
+        </div>
+
         <div class="row">
           <button id="liveBtn">Start auto watch</button>
           <button id="stopLiveBtn">Stop auto watch</button>
@@ -344,28 +421,12 @@
           <div class="stat"><span class="stat-label">Motor Mode</span><span id="motorModeOut" class="stat-value">n/a</span></div>
         </div>
 
-        <div class="section-title">Camera view estimate</div>
-        <svg id="cameraFrame" class="camera-frame" viewBox="0 0 480 270" aria-label="Estimated camera frame"></svg>
-
         <div class="timeline-wrap">
           <div class="row" style="margin-bottom: 6px;">
             <span class="pill">Timeline scrubber</span>
             <span id="timelineHint" class="helper">Pick one node to scrub or play history.</span>
           </div>
           <input id="timeline" type="range" min="0" max="0" value="0" step="1" />
-        </div>
-
-        <div class="section-title">Audio cue scene</div>
-        <div id="audioCue" class="audio-cue">
-          <div class="audio-cue-row">
-            <span id="audioStatusPill" class="pill">audio waiting</span>
-            <span id="audioCueCount" class="helper mono">cue n/a</span>
-          </div>
-          <div id="audioActorOut" class="audio-actor">n/a</div>
-          <div class="helper mono">node: <span id="audioNodeOut">n/a</span></div>
-          <div class="helper">Next: <span id="audioNextOut">n/a</span></div>
-          <div class="helper">Last trigger: <span id="audioTriggerOut">n/a</span></div>
-          <div id="audioTranscripts" class="transcript-list"></div>
         </div>
 
         <div class="section-title">Latest node snapshots</div>
@@ -406,12 +467,14 @@
     const audioNextOut = document.getElementById('audioNextOut');
     const audioTriggerOut = document.getElementById('audioTriggerOut');
     const audioTranscripts = document.getElementById('audioTranscripts');
+    const audioScript = document.getElementById('audioScript');
 
     const dims = { w: 980, h: 780, pad: 78 };
     const ANCHORS_URL = 'anchors.json';
     const HISTORY_URL_CANDIDATES = ['central_history.json', 'history.json'];
     const MOTOR_STATE_URL = 'motor_state.json';
     const AUDIO_STATE_URL = 'audio_state.json';
+    const AUDIO_SCENE_URL = 'audio_controls/scene.json';
     const urlParams = new URLSearchParams(window.location.search);
     const requestedPollMs = Number(urlParams.get('poll'));
     const POLL_MS = Number.isFinite(requestedPollMs)
@@ -463,6 +526,9 @@
     let lastMotorStateRaw = '';
     let audioState = null;
     let lastAudioStateRaw = '';
+    let audioScene = [];
+    let audioActors = {};
+    let lastAudioSceneRaw = '';
 
     let watchTimer = null;
     let watchInFlight = false;
@@ -834,6 +900,7 @@
         audioNextOut.textContent = 'n/a';
         audioTriggerOut.textContent = 'n/a';
         audioTranscripts.innerHTML = '<div class="empty">No audio cue state yet.</div>';
+        renderAudioScript();
         return;
       }
 
@@ -864,6 +931,40 @@
               </div>
             `).join('')
         : '<div class="empty">No transcripts yet.</div>';
+      renderAudioScript();
+    }
+
+    function renderAudioScript() {
+      if (!audioScene.length) {
+        audioScript.innerHTML = '<div class="empty">No script loaded yet.</div>';
+        return;
+      }
+
+      const currentIndexRaw = Number(audioState?.cue_index ?? 0);
+      const currentIndex = Number.isFinite(currentIndexRaw) ? currentIndexRaw : 0;
+      audioScript.innerHTML = audioScene.map((cue, index) => {
+        const actor = cue.actor ?? 'Unknown';
+        const nextActor = cue.next_actor ?? 'End';
+        const actorConfig = audioActors?.[actor] ?? {};
+        const nodeId = actorConfig.node_id ?? 'n/a';
+        const stateClass = index < currentIndex ? 'done' : (index === currentIndex ? 'active' : 'upcoming');
+        const centerClass = actorConfig.home || nodeId === '__center__' ? 'center-cue' : '';
+        return `
+          <div class="script-cue ${stateClass} ${centerClass}" id="script-cue-${index}">
+            <div class="script-actor">
+              <span>${esc(index)} · ${esc(actor)}</span>
+              <span class="mono">${esc(nodeId)}</span>
+            </div>
+            <div class="script-lines">${esc(cue.lines ?? '')}</div>
+            <div class="script-trigger">trigger: "${esc(cue.trigger ?? '')}" · next: ${esc(nextActor)}</div>
+          </div>
+        `;
+      }).join('');
+
+      const active = document.getElementById(`script-cue-${currentIndex}`);
+      if (active) {
+        active.scrollIntoView({ block: 'nearest' });
+      }
     }
 
     function renderNodeLegend() {
@@ -1318,18 +1419,38 @@
       }
     }
 
+    async function syncAudioScene({ forceRedraw = false } = {}) {
+      if (usingUploadedFile) return false;
+      try {
+        const text = await fetchText(AUDIO_SCENE_URL);
+        if (!forceRedraw && text === lastAudioSceneRaw) return false;
+        const data = JSON.parse(text);
+        audioScene = Array.isArray(data.scene) ? data.scene : [];
+        audioActors = data.actors && typeof data.actors === 'object' ? data.actors : {};
+        lastAudioSceneRaw = text;
+        renderAudioScript();
+        return true;
+      } catch (err) {
+        audioScene = [];
+        audioActors = {};
+        renderAudioScript();
+        return false;
+      }
+    }
+
     async function syncAll(statusLabel = 'synced', { forceRedraw = false } = {}) {
       const anchorsChanged = await syncAnchors({ forceRedraw });
       const historyChanged = await syncHistory(statusLabel, { forceRedraw });
       const motorChanged = await syncMotorState({ forceRedraw });
       const audioChanged = await syncAudioState({ forceRedraw });
-      if (!anchorsChanged && !historyChanged && !motorChanged && !audioChanged && forceRedraw) {
+      const audioSceneChanged = await syncAudioScene({ forceRedraw });
+      if (!anchorsChanged && !historyChanged && !motorChanged && !audioChanged && !audioSceneChanged && forceRedraw) {
         refreshStatsForSelection(statusLabel);
         refreshMotorStats();
         refreshAudioCue();
         draw();
       }
-      if (!anchorsChanged && !historyChanged && !motorChanged && !audioChanged && watchTimer) {
+      if (!anchorsChanged && !historyChanged && !motorChanged && !audioChanged && !audioSceneChanged && watchTimer) {
         setStatus(`auto watching ${currentSourceName}`);
       }
     }
@@ -1473,6 +1594,7 @@
     refreshStatsForSelection('idle');
     refreshMotorStats();
     refreshAudioCue();
+    renderAudioScript();
     draw();
     startWatching();
   </script>
