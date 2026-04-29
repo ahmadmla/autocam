@@ -77,6 +77,7 @@ mqtt_connected = False
 latest_transcripts = {}
 last_trigger = None
 last_event_source = "startup"
+initial_target_published = False
 
 # Actor color map — add more actors here as needed
 ACTOR_COLORS = {
@@ -108,6 +109,7 @@ def write_audio_state() -> None:
             "timestamp": time.time(),
             "mqtt_connected": mqtt_connected,
             "cue_index": index,
+            "cue_display_index": min(index, len(scene)),
             "cue_total": len(scene),
             "current_actor": current_actor,
             "current_node_id": actor_node_id(current_actor),
@@ -162,6 +164,19 @@ def publish_target_request(actor: Optional[str], source: str) -> None:
     write_audio_state()
 
 
+def publish_initial_target_request(source: str = "audio_cue_0") -> None:
+    global current_cue_index, initial_target_published, last_event_source
+    if not scene:
+        return
+    with state_lock:
+        current_actor = scene[0]["actor"]
+        current_cue_index = 0
+        initial_target_published = True
+        last_event_source = source
+    print(f"[CUE/0] initial actor={current_actor}", flush=True)
+    publish_target_request(current_actor, source=source)
+
+
 def on_mqtt_connect(client, userdata, flags, reason_code, properties=None):
     global mqtt_connected
     mqtt_connected = True
@@ -169,8 +184,7 @@ def on_mqtt_connect(client, userdata, flags, reason_code, properties=None):
     client.subscribe(AUDIO_EVENT_TOPIC, qos=MQTT_QOS)
     print(f"[MQTT] subscribed topic={AUDIO_EVENT_TOPIC}", flush=True)
     write_audio_state()
-    if scene:
-        publish_target_request(scene[0]["actor"], source="audio_initial")
+    publish_initial_target_request()
 
 
 def on_mqtt_disconnect(client, userdata, disconnect_flags=None, reason_code=None, properties=None):

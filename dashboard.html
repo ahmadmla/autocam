@@ -838,10 +838,10 @@
       }
 
       audioStatusPill.textContent = audioState.mqtt_connected ? 'audio mqtt connected' : 'audio mqtt offline';
-      const cueIndex = Number(audioState.cue_index);
+      const cueIndex = Number(audioState.cue_display_index ?? audioState.cue_index);
       const cueTotal = Number(audioState.cue_total);
       audioCueCount.textContent = Number.isFinite(cueIndex) && Number.isFinite(cueTotal)
-        ? `cue ${Math.min(cueIndex + 1, cueTotal)} / ${cueTotal}`
+        ? `cue ${Math.min(cueIndex, cueTotal)} / ${cueTotal}`
         : 'cue n/a';
       audioActorOut.textContent = audioState.current_actor || 'Scene end';
       audioNodeOut.textContent = audioState.current_node_id || 'n/a';
