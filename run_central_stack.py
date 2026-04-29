@@ -123,6 +123,7 @@ def start_process(managed: ManagedProcess) -> None:
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        start_new_session=(os.name != "nt"),
     )
     managed.reader_thread = threading.Thread(
         target=stream_output,
