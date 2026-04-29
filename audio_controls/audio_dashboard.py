@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -32,6 +33,13 @@ def env_int(name: str, default: int) -> int:
     value = os.getenv(name)
     if value in (None, ""):
         return default
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value in (None, ""):
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
     try:
         return int(value)
     except ValueError:
@@ -51,6 +59,7 @@ AUDIO_DASHBOARD_PORT = env_int("AUDIO_DASHBOARD_PORT", 5000)
 AUDIO_STATE_PATH = Path(env_str("AUDIO_STATE_PATH", str(REPO_ROOT / "audio_state.json")))
 if not AUDIO_STATE_PATH.is_absolute():
     AUDIO_STATE_PATH = REPO_ROOT / AUDIO_STATE_PATH
+AUDIO_TRIGGER_DEBUG = env_bool("AUDIO_TRIGGER_DEBUG", True)
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
@@ -226,7 +235,16 @@ mqtt_client.on_message = on_mqtt_message
 mqtt_client.reconnect_delay_set(min_delay=1, max_delay=10)
 
 
+def normalize_match_text(value: str) -> str:
+    value = value.lower()
+    value = value.replace("’", "'").replace("‘", "'").replace("`", "'")
+    value = re.sub(r"[^a-z0-9']+", " ", value)
+    return " ".join(value.split())
+
+
 def fuzzy_match(phrase, text, threshold=0.80):
+    phrase = normalize_match_text(phrase)
+    text = normalize_match_text(text)
     words = text.split()
     phrase_words = phrase.split()
     n = len(phrase_words)
@@ -241,8 +259,8 @@ def fuzzy_match(phrase, text, threshold=0.80):
 
 
 def phonetic_match(phrase, text, threshold=0.75):
-    phrase_words = phrase.lower().split()
-    text_words = text.lower().split()
+    phrase_words = normalize_match_text(phrase).split()
+    text_words = normalize_match_text(text).split()
     phrase_codes = [doublemetaphone(w)[0] for w in phrase_words]
     text_codes = [doublemetaphone(w)[0] for w in text_words]
     n = len(phrase_codes)
@@ -312,7 +330,14 @@ def check_trigger(text, actor, is_final):
 
         # Only process messages from the currently active actor
         if actor != cue["actor"]:
+            if AUDIO_TRIGGER_DEBUG and is_final:
+                print(
+                    f"[CUE/WAIT] ignored actor={actor} expected_actor={cue['actor']} "
+                    f"expected_trigger=\"{cue['trigger']}\"",
+                    flush=True,
+                )
             return
+        cue_index_for_log = current_cue_index
 
     trigger = cue["trigger"].lower()
     fuzzy_hit = fuzzy_match(trigger, text.lower())
@@ -325,6 +350,12 @@ def check_trigger(text, actor, is_final):
         method = "fuzzy" if fuzzy_hit else "phonetic"
         source = f"{'FINAL' if is_final else 'PARTIAL'}/{method}"
         fire_cue(cue_index, source=source)
+    elif AUDIO_TRIGGER_DEBUG and is_final:
+        print(
+            f"[CUE/WAIT] cue={cue_index_for_log} actor={actor} "
+            f"expected_trigger=\"{cue['trigger']}\" heard=\"{text}\"",
+            flush=True,
+        )
 
 
 @socketio.on('manual_override')
