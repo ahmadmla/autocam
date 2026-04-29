@@ -11,6 +11,10 @@
     },
     "Kristine": {
       "node_id": "rpi4"
+    },
+    "Center": {
+      "node_id": "__center__",
+      "home": true
     }
   },
   "scene": [
@@ -60,7 +64,7 @@
       "actor": "Torvald",
       "lines": "I do believe you, Nora, but we must face this together. There can be no more hidden deeds between us.",
       "trigger": "hidden deeds between us",
-      "next_actor": null
+      "next_actor": "Center"
     }
   ]
 }

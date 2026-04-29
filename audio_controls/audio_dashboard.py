@@ -63,6 +63,11 @@ actor_nodes = {
     for actor, config in scene_doc.get("actors", {}).items()
     if isinstance(config, dict)
 }
+actor_home_flags = {
+    actor: bool(config.get("home", False))
+    for actor, config in scene_doc.get("actors", {}).items()
+    if isinstance(config, dict)
+}
 
 # Collect all unique actor names from the scene
 all_actors = list(dict.fromkeys(
@@ -119,6 +124,7 @@ def write_audio_state() -> None:
             "last_event_source": last_event_source,
             "latest_transcripts": latest_transcripts,
             "actors": actor_nodes,
+            "home_actors": actor_home_flags,
         }
     tmp_path = AUDIO_STATE_PATH.with_suffix(AUDIO_STATE_PATH.suffix + ".tmp")
     tmp_path.write_text(json.dumps(payload, indent=2, allow_nan=False), encoding="utf-8")
@@ -154,6 +160,8 @@ def publish_target_request(actor: Optional[str], source: str) -> None:
         "source": source,
         "ts": time.time(),
     }
+    if actor_home_flags.get(actor, False) or node_id == "__center__":
+        payload["home"] = True
     mqtt_client.publish(
         TARGET_REQUEST_TOPIC,
         json.dumps(payload, separators=(",", ":"), allow_nan=False),

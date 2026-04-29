@@ -69,6 +69,7 @@ BURST_ACTIVE_S = env_float("BURST_ACTIVE_S", 0.50)
 BURST_RESPONSE_TIMEOUT_S = env_float("BURST_RESPONSE_TIMEOUT_S", 0.75)
 BURST_POST_PAUSE_GRACE_S = env_float("BURST_POST_PAUSE_GRACE_S", 0.05)
 TARGET_REQUEST_MAX_AGE_S = env_float("TARGET_REQUEST_MAX_AGE_S", 10.0)
+CENTER_NODE_ID = "__center__"
 
 
 class RoundRobinScheduler:
@@ -142,13 +143,14 @@ class RoundRobinScheduler:
         node_id = str(payload.get("node_id", "")).strip()
         actor = str(payload.get("actor", "")).strip()
         source = str(payload.get("source", "")).strip() or "unknown"
+        home = bool(payload.get("home", False)) or node_id == CENTER_NODE_ID
         if not node_id:
             print(
                 f"target request ignored reason=missing_node actor={actor or '-'} source={source}",
                 flush=True,
             )
             return
-        if node_id not in NODES:
+        if not home and node_id not in NODES:
             print(
                 f"target request ignored reason=unknown_node node={node_id} actor={actor or '-'} source={source}",
                 flush=True,
@@ -169,6 +171,7 @@ class RoundRobinScheduler:
             "node_id": node_id,
             "actor": actor,
             "source": source,
+            "home": home,
             "ts": ts if isinstance(ts, (int, float)) else time.time(),
         }
         with self.cv:
@@ -177,7 +180,7 @@ class RoundRobinScheduler:
                 self.target_requests.popleft()
             self.cv.notify_all()
         print(
-            f"target request queued node={node_id} actor={actor or '-'} source={source}",
+            f"target request queued node={node_id} actor={actor or '-'} home={int(home)} source={source}",
             flush=True,
         )
 
@@ -238,6 +241,23 @@ class RoundRobinScheduler:
         }
         if actor:
             payload["actor"] = actor
+        self.client.publish(
+            TARGET_SELECT_TOPIC,
+            json.dumps(payload, separators=(",", ":"), allow_nan=False),
+            qos=MQTT_QOS,
+            retain=RETAIN_TARGET_SELECT,
+        )
+
+    def publish_home_select(self, *, actor: Optional[str], source: str) -> None:
+        token = self.next_token(CENTER_NODE_ID)
+        payload = {
+            "node_id": CENTER_NODE_ID,
+            "actor": actor or "Center",
+            "source": source,
+            "slot_token": token,
+            "home": True,
+            "ts": time.time(),
+        }
         self.client.publish(
             TARGET_SELECT_TOPIC,
             json.dumps(payload, separators=(",", ":"), allow_nan=False),
@@ -314,6 +334,18 @@ class RoundRobinScheduler:
 
             node_id = request["node_id"]
             actor = request.get("actor") or ""
+            if bool(request.get("home", False)) or node_id == CENTER_NODE_ID:
+                for pause_node_id in NODES:
+                    self.publish_pause(pause_node_id)
+                    print(
+                        f"audio_scene pause_for_home node={pause_node_id} actor={actor or 'Center'}",
+                        flush=True,
+                    )
+                self.current_audio_node = None
+                self.current_audio_token = None
+                self.publish_home_select(actor=actor, source="scheduler_audio_scene")
+                print(f"audio_scene home actor={actor or 'Center'}", flush=True)
+                continue
             if node_id == self.current_audio_node:
                 self.pause_inactive_nodes(node_id)
                 token = self.current_audio_token or self.next_token(node_id)

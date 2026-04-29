@@ -135,6 +135,7 @@ class MotorControllerApp:
         self.poses: Dict[str, FilteredPoseMessage] = {}
         self.selected_node = config.mqtt.target_node
         self.vision_correction: Optional[VisionCorrection] = None
+        self.home_requested = False
         self.armed = False
         self.running = True
         self.mqtt_connected = False
@@ -322,11 +323,23 @@ class MotorControllerApp:
 
     def handle_target_select(self, payload: dict) -> None:
         node_id = str(payload.get("node_id") or "").strip()
+        if bool(payload.get("home", False)) or node_id == "__center__":
+            self.selected_node = node_id or "__center__"
+            self.home_requested = True
+            self.centered_since_monotonic = None
+            self._reset_pan_control_state()
+            self.truck_error_filtered = 0.0
+            self.truck_rail_target_filtered = None
+            self.truck_rail_target_committed = None
+            self._clear_stationary_hold("target_home")
+            LOG.warning("target_select home=1 actor=%s source=%s", payload.get("actor") or "Center", payload.get("source") or "manual")
+            return
         if not node_id:
             return
         if node_id == self.selected_node:
             return
         self.selected_node = node_id
+        self.home_requested = False
         self.centered_since_monotonic = None
         self._reset_pan_control_state()
         self._clear_stationary_hold("target_select")
@@ -482,6 +495,65 @@ class MotorControllerApp:
                 rail_error_m,
             )
         return self._ramp_truck_with_min(self.logical_truck_command, int(round(raw_target)), dt_s)
+
+    def build_home_command(self, dt_s: float) -> AxisCommand:
+        pose = self.pose_estimator.pose
+        target_pan_deg = self.config.camera_pose.start_pan_deg
+        pan_error_deg = self._normalize_angle_deg(target_pan_deg - pose.pan_deg)
+        pan_effective_error_deg = max(0.0, abs(pan_error_deg) - self.config.control.pan_bearing_deadband_deg)
+        if pan_effective_error_deg <= 0.0:
+            pan_target = 0
+        else:
+            linear_raw_abs = (
+                self.config.control.pan_goto_speed_factor
+                * pan_effective_error_deg
+                / max(
+                    self.config.motor.pan_deg_per_raw_speed_s
+                    * self.config.control.pan_goto_target_time_s,
+                    1e-9,
+                )
+            )
+            if self.config.control.pan_goto_curve == "log":
+                log_scale = max(1.0, self.config.control.pan_goto_log_raw_scale)
+                raw_abs = log_scale * math.log1p(linear_raw_abs / log_scale)
+            else:
+                raw_abs = linear_raw_abs
+            raw_abs = max(float(self.config.control.pan_goto_min_raw_speed), raw_abs)
+            pan_target = int(round(math.copysign(
+                min(raw_abs, float(self.config.motor.pan_max_raw_speed)),
+                pan_error_deg,
+            )))
+
+        rail_error_m = self.config.camera_pose.start_rail_m - pose.rail_position_m
+        truck_target = self._truck_goto_raw_from_rail_error(rail_error_m, dt_s)
+        if abs(rail_error_m) <= self.config.control.truck_rail_deadband_m:
+            truck_target = 0
+
+        pan_raw = self._ramp_pan_with_min(self.logical_pan_command, pan_target, dt_s)
+        truck_raw = self._ramp_truck_with_min(self.logical_truck_command, truck_target, dt_s)
+        mode = "HOME_GOTO"
+        if self.pose_estimator.blocks_pan(pan_raw):
+            pan_raw = 0
+            mode += "_PAN_SOFT_LIMIT"
+        if self.pose_estimator.blocks_truck(truck_raw):
+            truck_raw = 0
+            mode += "_TRUCK_SOFT_LIMIT"
+        if pan_raw == 0 and truck_raw == 0:
+            mode += "_HOLD"
+        return AxisCommand(
+            pan_raw=pan_raw,
+            truck_raw=truck_raw,
+            mode=mode,
+            projected=None,
+            error_x_px=None,
+            source="home_target",
+            desired_bearing_deg=None,
+            pan_error_deg=pan_error_deg,
+            bearing_rate_deg_s=0.0,
+            current_rail_m=pose.rail_position_m,
+            rail_error_m=rail_error_m,
+            committed_desired_rail_m=self.config.camera_pose.start_rail_m,
+        )
 
     @staticmethod
     def _sign(value: int | float) -> int:
@@ -1741,6 +1813,16 @@ class MotorControllerApp:
                 self._clear_stationary_hold("unarmed_invalid_pose")
                 self.stop_motors()
                 command = AxisCommand(0, 0, "UNARMED_INVALID_POSE", None, None, "none")
+                self.write_visualizer_state(command, None, now)
+                self.log_tick(command, None, now)
+                return
+
+            if self.home_requested:
+                statuses = dict(self.latest_statuses)
+                if statuses:
+                    self._raise_faults(statuses)
+                command = self.build_home_command(dt_s)
+                self.send_command(command)
                 self.write_visualizer_state(command, None, now)
                 self.log_tick(command, None, now)
                 return
