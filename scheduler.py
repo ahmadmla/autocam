@@ -49,6 +49,7 @@ CMD_TOPIC_BASE = "uwb/cmd"
 TARGET_SELECT_TOPIC = env_str("AUTOCAM_TARGET_SELECT_TOPIC", "autocam/target/select")
 TARGET_REQUEST_TOPIC = env_str("AUTOCAM_TARGET_REQUEST_TOPIC", "autocam/target/request")
 PUBLISH_TARGET_SELECT = bool(env_int("SCHEDULER_PUBLISH_TARGET_SELECT", 0))
+RETAIN_TARGET_SELECT = bool(env_int("SCHEDULER_RETAIN_TARGET_SELECT", 1))
 SCHEDULER_MODE = env_str("SCHEDULER_MODE", "round_robin").strip().lower()
 if SCHEDULER_MODE not in {"round_robin", "audio_scene"}:
     SCHEDULER_MODE = "round_robin"
@@ -241,7 +242,7 @@ class RoundRobinScheduler:
             TARGET_SELECT_TOPIC,
             json.dumps(payload, separators=(",", ":"), allow_nan=False),
             qos=MQTT_QOS,
-            retain=False,
+            retain=RETAIN_TARGET_SELECT,
         )
 
     def publish_pause(self, node_id: str) -> None:
@@ -283,6 +284,16 @@ class RoundRobinScheduler:
 
         return None
 
+    def pause_inactive_nodes(self, target_node_id: str) -> None:
+        for node_id in NODES:
+            if node_id == target_node_id:
+                continue
+            self.publish_pause(node_id)
+            print(
+                f"audio_scene pause_inactive node={node_id} target_node={target_node_id}",
+                flush=True,
+            )
+
     def wait_for_target_request(self) -> Optional[dict]:
         with self.cv:
             while self.running:
@@ -304,6 +315,7 @@ class RoundRobinScheduler:
             node_id = request["node_id"]
             actor = request.get("actor") or ""
             if node_id == self.current_audio_node:
+                self.pause_inactive_nodes(node_id)
                 token = self.current_audio_token or self.next_token(node_id)
                 self.current_audio_token = token
                 self.publish_target_select(
@@ -326,6 +338,7 @@ class RoundRobinScheduler:
                     flush=True,
                 )
 
+            self.pause_inactive_nodes(node_id)
             token = self.next_token(node_id)
             self.current_audio_node = node_id
             self.current_audio_token = token
@@ -465,6 +478,7 @@ def main() -> None:
         f"burst_grace={BURST_POST_PAUSE_GRACE_S:.2f}s "
         f"single_node={SINGLE_NODE_MODE} "
         f"publish_target_select={PUBLISH_TARGET_SELECT} "
+        f"retain_target_select={RETAIN_TARGET_SELECT} "
         f"timeout_skip={TIMEOUT_SKIP_THRESHOLD} "
         f"cooldown={TIMEOUT_COOLDOWN_S:.2f}s",
         flush=True,
