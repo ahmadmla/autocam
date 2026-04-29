@@ -1,3 +1,7 @@
 paho-mqtt>=1.6,<3
 pyserial>=3.5,<4
 pymodbus>=3.6,<4
+Flask>=3.0,<4
+Flask-SocketIO>=5.3,<6
+pyzmq>=25,<27
+Metaphone>=0.6,<1

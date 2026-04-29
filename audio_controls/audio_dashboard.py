@@ -1,16 +1,68 @@
 import json
+import os
+import sys
 import threading
+import time
+from pathlib import Path
+from typing import Optional
+
 import zmq
-from flask import Flask, render_template_string
+from flask import Flask
 from flask_socketio import SocketIO
 from difflib import SequenceMatcher
 from metaphone import doublemetaphone
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from env_loader import load_repo_env
+
+load_repo_env()
+
+import paho.mqtt.client as mqtt
+
+
+def env_str(name: str, default: str) -> str:
+    value = os.getenv(name)
+    return value if value not in (None, "") else default
+
+
+def env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value in (None, ""):
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+MODULE_DIR = Path(__file__).resolve().parent
+SCENE_PATH = Path(env_str("AUDIO_SCENE_PATH", str(MODULE_DIR / "scene.json")))
+if not SCENE_PATH.is_absolute():
+    SCENE_PATH = REPO_ROOT / SCENE_PATH
+MQTT_HOST = env_str("MQTT_HOST", "127.0.0.1")
+MQTT_PORT = env_int("MQTT_PORT", 1883)
+MQTT_QOS = env_int("MQTT_QOS", 0)
+TARGET_REQUEST_TOPIC = env_str("AUTOCAM_TARGET_REQUEST_TOPIC", "autocam/target/request")
+AUDIO_EVENT_TOPIC = env_str("AUTOCAM_AUDIO_EVENT_TOPIC", "autocam/audio/event")
+AUDIO_DASHBOARD_PORT = env_int("AUDIO_DASHBOARD_PORT", 5000)
+AUDIO_STATE_PATH = Path(env_str("AUDIO_STATE_PATH", str(REPO_ROOT / "audio_state.json")))
+if not AUDIO_STATE_PATH.is_absolute():
+    AUDIO_STATE_PATH = REPO_ROOT / AUDIO_STATE_PATH
+
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-with open("scene.json") as f:
-    scene = json.load(f)["scene"]
+with SCENE_PATH.open(encoding="utf-8") as f:
+    scene_doc = json.load(f)
+scene = scene_doc["scene"]
+actor_nodes = {
+    actor: str(config.get("node_id", "")).strip()
+    for actor, config in scene_doc.get("actors", {}).items()
+    if isinstance(config, dict)
+}
 
 # Collect all unique actor names from the scene
 all_actors = list(dict.fromkeys(
@@ -20,6 +72,11 @@ all_actors = list(dict.fromkeys(
 
 current_cue_index = 0
 cue_fired = False
+state_lock = threading.RLock()
+mqtt_connected = False
+latest_transcripts = {}
+last_trigger = None
+last_event_source = "startup"
 
 # Actor color map — add more actors here as needed
 ACTOR_COLORS = {
@@ -30,19 +87,121 @@ ACTOR_COLORS = {
 }
 
 
-def send_motor_command(actor):
-    """
-    Send pivot command to motor controller.
-    Replace this with your actual motor controller integration —
-    either an HTTP request or a ZeroMQ message to your teammate's system.
-    """
-    print(f"[MOTOR] Pivot to {actor}")
-    # Example HTTP implementation (uncomment and configure when ready):
-    # import requests
-    # try:
-    #     requests.post("http://motor-controller-ip/pivot", json={"actor": actor})
-    # except Exception as e:
-    #     print(f"[MOTOR] Failed: {e}")
+def current_actor_for_index(index: int) -> Optional[str]:
+    if 0 <= index < len(scene):
+        return scene[index]["actor"]
+    return None
+
+
+def next_actor_for_index(index: int) -> Optional[str]:
+    if 0 <= index < len(scene):
+        return scene[index].get("next_actor")
+    return None
+
+
+def write_audio_state() -> None:
+    with state_lock:
+        index = current_cue_index
+        current_actor = current_actor_for_index(index)
+        next_actor = next_actor_for_index(index)
+        payload = {
+            "timestamp": time.time(),
+            "mqtt_connected": mqtt_connected,
+            "cue_index": index,
+            "cue_total": len(scene),
+            "current_actor": current_actor,
+            "current_node_id": actor_node_id(current_actor),
+            "next_actor": next_actor,
+            "next_node_id": actor_node_id(next_actor),
+            "last_trigger": last_trigger,
+            "last_event_source": last_event_source,
+            "latest_transcripts": latest_transcripts,
+            "actors": actor_nodes,
+        }
+    tmp_path = AUDIO_STATE_PATH.with_suffix(AUDIO_STATE_PATH.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2, allow_nan=False), encoding="utf-8")
+    tmp_path.replace(AUDIO_STATE_PATH)
+
+
+try:
+    mqtt_client = mqtt.Client(
+        mqtt.CallbackAPIVersion.VERSION2,
+        client_id="autocam_audio_dashboard",
+    )
+except AttributeError:
+    mqtt_client = mqtt.Client(client_id="autocam_audio_dashboard")
+
+
+def actor_node_id(actor: Optional[str]) -> Optional[str]:
+    if not actor:
+        return None
+    node_id = actor_nodes.get(actor)
+    if not node_id:
+        print(f"[AUDIO] Missing node mapping for actor={actor}", flush=True)
+        return None
+    return node_id
+
+
+def publish_target_request(actor: Optional[str], source: str) -> None:
+    node_id = actor_node_id(actor)
+    if not actor or not node_id:
+        return
+    payload = {
+        "actor": actor,
+        "node_id": node_id,
+        "source": source,
+        "ts": time.time(),
+    }
+    mqtt_client.publish(
+        TARGET_REQUEST_TOPIC,
+        json.dumps(payload, separators=(",", ":"), allow_nan=False),
+        qos=MQTT_QOS,
+        retain=False,
+    )
+    print(f"[TARGET] request actor={actor} node={node_id} source={source}", flush=True)
+    write_audio_state()
+
+
+def on_mqtt_connect(client, userdata, flags, reason_code, properties=None):
+    global mqtt_connected
+    mqtt_connected = True
+    print(f"[MQTT] connected host={MQTT_HOST} port={MQTT_PORT} rc={reason_code}", flush=True)
+    client.subscribe(AUDIO_EVENT_TOPIC, qos=MQTT_QOS)
+    print(f"[MQTT] subscribed topic={AUDIO_EVENT_TOPIC}", flush=True)
+    write_audio_state()
+    if scene:
+        publish_target_request(scene[0]["actor"], source="audio_initial")
+
+
+def on_mqtt_disconnect(client, userdata, disconnect_flags=None, reason_code=None, properties=None):
+    global mqtt_connected
+    mqtt_connected = False
+    print(f"[MQTT] disconnected rc={reason_code}", flush=True)
+    write_audio_state()
+
+
+def on_mqtt_message(client, userdata, msg):
+    if msg.topic != AUDIO_EVENT_TOPIC:
+        return
+    try:
+        payload = json.loads(msg.payload.decode("utf-8"))
+    except Exception as exc:
+        print(f"[AUDIO] event parse error: {exc}", flush=True)
+        return
+    if payload.get("event") != "actor_done":
+        print(f"[AUDIO] ignored event={payload.get('event')}", flush=True)
+        return
+    actor = str(payload.get("actor", "")).strip()
+    if not actor:
+        print("[AUDIO] actor_done ignored reason=missing_actor", flush=True)
+        return
+    handle_actor_done(actor, source=str(payload.get("source", "audio_node")))
+
+
+mqtt_client.on_connect = on_mqtt_connect
+mqtt_client.on_disconnect = on_mqtt_disconnect
+mqtt_client.on_message = on_mqtt_message
+mqtt_client.reconnect_delay_set(min_delay=1, max_delay=10)
 
 
 def fuzzy_match(phrase, text, threshold=0.80):
@@ -79,56 +238,84 @@ def phonetic_match(phrase, text, threshold=0.75):
 
 def fire_cue(cue_index, source="AUTO"):
     """Fire a cue by index and advance the system state."""
-    global current_cue_index, cue_fired
-    cue = scene[cue_index]
-    next_index = cue_index + 1
-    next_actor = cue["next_actor"]
-    print(f"[CUE/{source}] '{cue['trigger']}' -> next: {next_actor}")
-    cue_fired = False
-    current_cue_index = next_index
-    socketio.emit("cue_fired", {
-        "fired_index": cue_index,
-        "next_index": next_index,
-        "next_actor": next_actor,
-        "trigger": cue["trigger"]
-    })
+    global current_cue_index, cue_fired, last_trigger, last_event_source
+    with state_lock:
+        cue = scene[cue_index]
+        next_index = cue_index + 1
+        next_actor = cue["next_actor"]
+        print(f"[CUE/{source}] '{cue['trigger']}' -> next: {next_actor}", flush=True)
+        cue_fired = False
+        current_cue_index = next_index
+        last_trigger = cue["trigger"]
+        last_event_source = source
+        socketio.emit("cue_fired", {
+            "fired_index": cue_index,
+            "next_index": next_index,
+            "next_actor": next_actor,
+            "trigger": cue["trigger"]
+        })
+    write_audio_state()
     if next_actor:
-        send_motor_command(next_actor)
+        publish_target_request(next_actor, source=f"audio_{source.lower()}")
+
+
+def handle_actor_done(actor: str, source="audio_node"):
+    global cue_fired
+    with state_lock:
+        if current_cue_index >= len(scene):
+            print(f"[AUDIO] actor_done ignored actor={actor} reason=end_of_scene", flush=True)
+            return
+        cue = scene[current_cue_index]
+        if actor != cue["actor"]:
+            print(
+                f"[AUDIO] actor_done ignored actor={actor} expected={cue['actor']} source={source}",
+                flush=True,
+            )
+            return
+        cue_index = current_cue_index
+        cue_fired = True
+    print(f"[AUDIO] actor_done accepted actor={actor} source={source}", flush=True)
+    fire_cue(cue_index, source="AUDIO_DONE")
 
 
 def check_trigger(text, actor, is_final):
     global cue_fired
-    if cue_fired:
-        return
-    if current_cue_index >= len(scene):
-        return
+    with state_lock:
+        if cue_fired:
+            return
+        if current_cue_index >= len(scene):
+            return
 
-    cue = scene[current_cue_index]
+        cue = scene[current_cue_index]
 
-    # Only process messages from the currently active actor
-    if actor != cue["actor"]:
-        return
+        # Only process messages from the currently active actor
+        if actor != cue["actor"]:
+            return
 
     trigger = cue["trigger"].lower()
     fuzzy_hit = fuzzy_match(trigger, text.lower())
     phonetic_hit = phonetic_match(trigger, text.lower())
 
     if fuzzy_hit or phonetic_hit:
-        cue_fired = True
+        with state_lock:
+            cue_fired = True
+            cue_index = current_cue_index
         method = "fuzzy" if fuzzy_hit else "phonetic"
         source = f"{'FINAL' if is_final else 'PARTIAL'}/{method}"
-        fire_cue(current_cue_index, source=source)
+        fire_cue(cue_index, source=source)
 
 
 @socketio.on('manual_override')
 def handle_manual_override():
     global cue_fired
-    if current_cue_index >= len(scene):
-        print("[OVERRIDE] Already at end of scene.")
-        return
-    cue_fired = False
-    print(f"[OVERRIDE] Director manually advanced cue {current_cue_index}")
-    fire_cue(current_cue_index, source="OVERRIDE")
+    with state_lock:
+        if current_cue_index >= len(scene):
+            print("[OVERRIDE] Already at end of scene.", flush=True)
+            return
+        cue_fired = False
+        cue_index = current_cue_index
+    print(f"[OVERRIDE] Director manually advanced cue {cue_index}", flush=True)
+    fire_cue(cue_index, source="OVERRIDE")
 
 
 HTML = """
@@ -417,7 +604,7 @@ def zmq_listener():
     context = zmq.Context()
     sock = context.socket(zmq.PULL)
     sock.bind("tcp://*:5555")
-    print("Central cue engine listening for actor nodes...")
+    print("Central cue engine listening for actor nodes...", flush=True)
 
     while True:
         msg = sock.recv_json()
@@ -426,14 +613,34 @@ def zmq_listener():
         is_final = msg["type"] == "final"
 
         if is_final:
-            print(f"[{actor}] FINAL: {text}")
+            print(f"[{actor}] FINAL: {text}", flush=True)
 
+        with state_lock:
+            latest_transcripts[actor] = {
+                "text": text,
+                "type": msg.get("type"),
+                "timestamp": time.time(),
+            }
+        write_audio_state()
         socketio.emit("transcript", {"actor": actor, "text": text})
         check_trigger(text, actor, is_final)
 
 
 if __name__ == "__main__":
+    write_audio_state()
+    mqtt_client.connect(MQTT_HOST, MQTT_PORT, keepalive=30)
+    mqtt_client.loop_start()
     zmq_thread = threading.Thread(target=zmq_listener, daemon=True)
     zmq_thread.start()
-    print("Open http://<central-pi-ip>:5000 in your browser")
-    socketio.run(app, host="0.0.0.0", port=5000, debug=False)
+    print(f"Open http://<central-pi-ip>:{AUDIO_DASHBOARD_PORT} in your browser", flush=True)
+    try:
+        socketio.run(
+            app,
+            host="0.0.0.0",
+            port=AUDIO_DASHBOARD_PORT,
+            debug=False,
+            allow_unsafe_werkzeug=True,
+        )
+    finally:
+        mqtt_client.loop_stop()
+        mqtt_client.disconnect()

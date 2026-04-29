@@ -1,4 +1,18 @@
 {
+  "actors": {
+    "Nora": {
+      "node_id": "rpi1"
+    },
+    "Torvald": {
+      "node_id": "rpi2"
+    },
+    "Krogstad": {
+      "node_id": "rpi3"
+    },
+    "Kristine": {
+      "node_id": "rpi4"
+    }
+  },
   "scene": [
     {
       "actor": "Nora",

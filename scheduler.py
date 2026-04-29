@@ -5,7 +5,7 @@ import json
 import os
 import threading
 import time
-from typing import Dict, Optional
+from typing import Deque, Dict, Optional
 
 from env_loader import load_repo_env
 
@@ -47,7 +47,11 @@ MQTT_QOS = env_int("MQTT_QOS", 0)
 RAW_TOPIC = "uwb/raw/+"
 CMD_TOPIC_BASE = "uwb/cmd"
 TARGET_SELECT_TOPIC = env_str("AUTOCAM_TARGET_SELECT_TOPIC", "autocam/target/select")
+TARGET_REQUEST_TOPIC = env_str("AUTOCAM_TARGET_REQUEST_TOPIC", "autocam/target/request")
 PUBLISH_TARGET_SELECT = bool(env_int("SCHEDULER_PUBLISH_TARGET_SELECT", 0))
+SCHEDULER_MODE = env_str("SCHEDULER_MODE", "round_robin").strip().lower()
+if SCHEDULER_MODE not in {"round_robin", "audio_scene"}:
+    SCHEDULER_MODE = "round_robin"
 
 NODES = [
     node_id.strip()
@@ -63,6 +67,7 @@ TOKEN_RESPONSE_LIMIT = env_int("TOKEN_RESPONSE_LIMIT", 256)
 BURST_ACTIVE_S = env_float("BURST_ACTIVE_S", 0.50)
 BURST_RESPONSE_TIMEOUT_S = env_float("BURST_RESPONSE_TIMEOUT_S", 0.75)
 BURST_POST_PAUSE_GRACE_S = env_float("BURST_POST_PAUSE_GRACE_S", 0.05)
+TARGET_REQUEST_MAX_AGE_S = env_float("TARGET_REQUEST_MAX_AGE_S", 10.0)
 
 
 class RoundRobinScheduler:
@@ -75,6 +80,9 @@ class RoundRobinScheduler:
         self.token_counter = 0
         self.consecutive_timeouts: Dict[str, int] = {node_id: 0 for node_id in NODES}
         self.cooldown_until: Dict[str, float] = {node_id: 0.0 for node_id in NODES}
+        self.target_requests: Deque[dict] = deque()
+        self.current_audio_node: Optional[str] = None
+        self.current_audio_token: Optional[str] = None
 
         try:
             self.client = mqtt.Client(
@@ -93,11 +101,19 @@ class RoundRobinScheduler:
         print(f"scheduler mqtt connected rc={reason_code}", flush=True)
         client.subscribe(RAW_TOPIC, qos=MQTT_QOS)
         print(f"scheduler subscribed topic={RAW_TOPIC}", flush=True)
+        if SCHEDULER_MODE == "audio_scene":
+            client.subscribe(TARGET_REQUEST_TOPIC, qos=MQTT_QOS)
+            print(f"scheduler subscribed topic={TARGET_REQUEST_TOPIC}", flush=True)
 
     def on_disconnect(self, client, userdata, disconnect_flags=None, reason_code=None, properties=None):
         print(f"scheduler mqtt disconnected rc={reason_code}", flush=True)
 
     def on_message(self, client, userdata, msg):
+        topic = getattr(msg, "topic", "")
+        if topic == TARGET_REQUEST_TOPIC:
+            self.on_target_request(msg)
+            return
+
         try:
             payload = json.loads(msg.payload.decode("utf-8"))
             node_id = str(payload["node_id"])
@@ -114,6 +130,55 @@ class RoundRobinScheduler:
                 self.cv.notify_all()
         except Exception as exc:
             print(f"scheduler message parse error: {exc}", flush=True)
+
+    def on_target_request(self, msg) -> None:
+        try:
+            payload = json.loads(msg.payload.decode("utf-8"))
+        except Exception as exc:
+            print(f"target request parse error: {exc}", flush=True)
+            return
+
+        node_id = str(payload.get("node_id", "")).strip()
+        actor = str(payload.get("actor", "")).strip()
+        source = str(payload.get("source", "")).strip() or "unknown"
+        if not node_id:
+            print(
+                f"target request ignored reason=missing_node actor={actor or '-'} source={source}",
+                flush=True,
+            )
+            return
+        if node_id not in NODES:
+            print(
+                f"target request ignored reason=unknown_node node={node_id} actor={actor or '-'} source={source}",
+                flush=True,
+            )
+            return
+        ts = payload.get("ts")
+        if isinstance(ts, (int, float)) and TARGET_REQUEST_MAX_AGE_S > 0.0:
+            age_s = time.time() - float(ts)
+            if age_s > TARGET_REQUEST_MAX_AGE_S:
+                print(
+                    f"target request ignored reason=stale node={node_id} actor={actor or '-'} "
+                    f"age={age_s:.2f}s max_age={TARGET_REQUEST_MAX_AGE_S:.2f}s",
+                    flush=True,
+                )
+                return
+
+        request = {
+            "node_id": node_id,
+            "actor": actor,
+            "source": source,
+            "ts": ts if isinstance(ts, (int, float)) else time.time(),
+        }
+        with self.cv:
+            self.target_requests.append(request)
+            while len(self.target_requests) > TOKEN_RESPONSE_LIMIT:
+                self.target_requests.popleft()
+            self.cv.notify_all()
+        print(
+            f"target request queued node={node_id} actor={actor or '-'} source={source}",
+            flush=True,
+        )
 
     def start(self) -> None:
         self.client.connect(MQTT_HOST, MQTT_PORT, keepalive=30)
@@ -132,7 +197,14 @@ class RoundRobinScheduler:
         self.token_counter += 1
         return f"{node_id}-{self.token_counter}-{int(time.time() * 1000)}"
 
-    def publish_activate(self, node_id: str, token: str, *, continuous: bool) -> None:
+    def publish_activate(
+        self,
+        node_id: str,
+        token: str,
+        *,
+        continuous: bool,
+        publish_select: Optional[bool] = None,
+    ) -> None:
         topic = f"{CMD_TOPIC_BASE}/{node_id}"
         payload = {
             "cmd": "activate",
@@ -146,16 +218,25 @@ class RoundRobinScheduler:
             qos=MQTT_QOS,
             retain=False,
         )
-        if PUBLISH_TARGET_SELECT:
+        if PUBLISH_TARGET_SELECT if publish_select is None else publish_select:
             self.publish_target_select(node_id, token)
 
-    def publish_target_select(self, node_id: str, token: str) -> None:
+    def publish_target_select(
+        self,
+        node_id: str,
+        token: str,
+        *,
+        actor: Optional[str] = None,
+        source: str = "scheduler",
+    ) -> None:
         payload = {
             "node_id": node_id,
-            "source": "scheduler",
+            "source": source,
             "slot_token": token,
             "ts": time.time(),
         }
+        if actor:
+            payload["actor"] = actor
         self.client.publish(
             TARGET_SELECT_TOPIC,
             json.dumps(payload, separators=(",", ":"), allow_nan=False),
@@ -202,7 +283,74 @@ class RoundRobinScheduler:
 
         return None
 
+    def wait_for_target_request(self) -> Optional[dict]:
+        with self.cv:
+            while self.running:
+                if self.target_requests:
+                    return self.target_requests.popleft()
+                self.cv.wait(timeout=0.5)
+        return None
+
+    def run_audio_scene(self) -> None:
+        print(
+            f"audio_scene waiting target_request_topic={TARGET_REQUEST_TOPIC}",
+            flush=True,
+        )
+        while self.running:
+            request = self.wait_for_target_request()
+            if request is None:
+                continue
+
+            node_id = request["node_id"]
+            actor = request.get("actor") or ""
+            if node_id == self.current_audio_node:
+                token = self.current_audio_token or self.next_token(node_id)
+                self.current_audio_token = token
+                self.publish_target_select(
+                    node_id,
+                    token,
+                    actor=actor,
+                    source="scheduler_audio_scene",
+                )
+                print(
+                    f"audio_scene keep node={node_id} actor={actor or '-'} token={token}",
+                    flush=True,
+                )
+                continue
+
+            if self.current_audio_node is not None:
+                self.publish_pause(self.current_audio_node)
+                print(
+                    f"audio_scene pause node={self.current_audio_node} "
+                    f"next_node={node_id} actor={actor or '-'}",
+                    flush=True,
+                )
+
+            token = self.next_token(node_id)
+            self.current_audio_node = node_id
+            self.current_audio_token = token
+            self.publish_activate(
+                node_id,
+                token,
+                continuous=True,
+                publish_select=False,
+            )
+            self.publish_target_select(
+                node_id,
+                token,
+                actor=actor,
+                source="scheduler_audio_scene",
+            )
+            print(
+                f"audio_scene activate node={node_id} actor={actor or '-'} token={token}",
+                flush=True,
+            )
+
     def run(self) -> None:
+        if SCHEDULER_MODE == "audio_scene":
+            self.run_audio_scene()
+            return
+
         if SINGLE_NODE_MODE:
             node_id = NODES[0]
             token = self.next_token(node_id)
@@ -309,6 +457,7 @@ def main() -> None:
     scheduler = RoundRobinScheduler()
     print(
         f"scheduler start host={MQTT_HOST} port={MQTT_PORT} "
+        f"mode={SCHEDULER_MODE} "
         f"nodes={','.join(NODES)} slot_timeout={SLOT_TIMEOUT_S:.2f}s "
         f"gap={INTER_SLOT_GAP_S:.2f}s "
         f"burst={BURST_ACTIVE_S:.2f}s "

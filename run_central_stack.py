@@ -61,6 +61,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run the central stack without the pan/truck motor controller.",
     )
     parser.add_argument(
+        "--skip-audio-dashboard",
+        action="store_true",
+        help="Run the central stack without the audio cue dashboard.",
+    )
+    parser.add_argument(
         "--verbose-server",
         action="store_true",
         help="Print HTTP access logs for the static file server.",
@@ -195,6 +200,15 @@ def main() -> int:
             )
         )
 
+    if not args.skip_audio_dashboard:
+        processes.append(
+            ManagedProcess(
+                name="audio",
+                command=[python_exe, "audio_controls/audio_dashboard.py"],
+                env=base_env.copy(),
+            )
+        )
+
     stop_requested = False
     server_stop_event = threading.Event()
     server_thread: Optional[threading.Thread] = None
@@ -213,6 +227,11 @@ def main() -> int:
     if not args.skip_server:
         print(
             f"[launcher] dashboard=http://localhost:{args.http_port}/{REPO_NAME}/dashboard.html",
+            flush=True,
+        )
+    if not args.skip_audio_dashboard:
+        print(
+            f"[launcher] audio_dashboard=http://localhost:{os.getenv('AUDIO_DASHBOARD_PORT', '5000')}",
             flush=True,
         )
 
