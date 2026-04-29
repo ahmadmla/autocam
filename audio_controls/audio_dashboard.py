@@ -33,6 +33,10 @@ def env_int(name: str, default: int) -> int:
     value = os.getenv(name)
     if value in (None, ""):
         return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -40,10 +44,6 @@ def env_bool(name: str, default: bool = False) -> bool:
     if value in (None, ""):
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
-    try:
-        return int(value)
-    except ValueError:
-        return default
 
 
 MODULE_DIR = Path(__file__).resolve().parent
