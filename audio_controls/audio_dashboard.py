@@ -93,7 +93,7 @@ last_trigger = None
 last_event_source = "startup"
 initial_target_published = False
 
-# Actor color map — add more actors here as needed
+# Actor color map - add more actors here as needed
 ACTOR_COLORS = {
     "Nora":     "#ff6b9d",
     "Torvald":  "#4a9eff",
@@ -237,7 +237,7 @@ mqtt_client.reconnect_delay_set(min_delay=1, max_delay=10)
 
 def normalize_match_text(value: str) -> str:
     value = value.lower()
-    value = value.replace("’", "'").replace("‘", "'").replace("`", "'")
+    value = value.replace("\u2019", "'").replace("\u2018", "'").replace("`", "'")
     value = re.sub(r"[^a-z0-9']+", " ", value)
     return " ".join(value.split())
 
@@ -524,7 +524,7 @@ body {
     <div class="header-right">
         <div class="next-badge" id="next-badge">Next: NEXT_PLACEHOLDER</div>
         <button class="override-btn" id="override-btn" onclick="manualOverride()">
-            ⚡ Override
+            Override
         </button>
     </div>
 </div>
@@ -537,8 +537,8 @@ body {
 
 <div class="status-bar">
     Cue <span id="cue-counter">1</span> of <span id="cue-total">TOTAL_PLACEHOLDER</span>
-    &nbsp;·&nbsp;
-    Last trigger: <span id="last-trigger">—</span>
+    &nbsp;-&nbsp;
+    Last trigger: <span id="last-trigger">-</span>
 </div>
 
 <script>

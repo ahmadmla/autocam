@@ -20,13 +20,13 @@
   "scene": [
     {
       "actor": "Nora",
-      "lines": "Torvald, you mustn’t be angry with me, but I’ve done something that I hope you’ll forgive.",
+      "lines": "Torvald, you mustn't be angry with me, but I've done something that I hope you'll forgive.",
       "trigger": "hope you'll forgive",
       "next_actor": "Torvald"
     },
     {
       "actor": "Torvald",
-      "lines": "Nora, what is it you’ve done now? You know how I dislike secrets and deceit in this house.",
+      "lines": "Nora, what is it you've done now? You know how I dislike secrets and deceit in this house.",
       "trigger": "deceit in this house",
       "next_actor": "Nora"
     },
@@ -38,19 +38,19 @@
     },
     {
       "actor": "Torvald",
-      "lines": "You… borrowed money? Without my knowledge? Nora, you know how dangerous that could be for us.",
+      "lines": "You... borrowed money? Without my knowledge? Nora, you know how dangerous that could be for us.",
       "trigger": "could be for us",
       "next_actor": "Nora"
     },
     {
       "actor": "Nora",
-      "lines": "I know, Torvald. But I had no choice. I couldn’t let you suffer. It was for your sake alone.",
+      "lines": "I know, Torvald. But I had no choice. I couldn't let you suffer. It was for your sake alone.",
       "trigger": "for your sake alone",
       "next_actor": "Torvald"
     },
     {
       "actor": "Torvald",
-      "lines": "Nora, you must understand that honesty is the foundation of our home. Secrets like this… they shake everything.",
+      "lines": "Nora, you must understand that honesty is the foundation of our home. Secrets like this... they shake everything.",
       "trigger": "they shake everything",
       "next_actor": "Nora"
     },

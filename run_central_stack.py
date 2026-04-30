@@ -52,6 +52,21 @@ def env_str(name: str, default: str) -> str:
     return value if value not in (None, "") else default
 
 
+def mqtt_client(client_id: str):
+    try:
+        client = mqtt.Client(
+            mqtt.CallbackAPIVersion.VERSION2,
+            client_id=client_id,
+        )
+    except AttributeError:
+        client = mqtt.Client(client_id=client_id)
+    username = env_str("MQTT_USERNAME", "")
+    password = env_str("MQTT_PASSWORD", "")
+    if username:
+        client.username_pw_set(username, password)
+    return client
+
+
 @dataclass
 class ManagedProcess:
     name: str
@@ -204,13 +219,7 @@ def publish_shutdown_home() -> bool:
         "ts": time.time(),
     }
     try:
-        try:
-            client = mqtt.Client(
-                mqtt.CallbackAPIVersion.VERSION2,
-                client_id="autocam_launcher_shutdown",
-            )
-        except AttributeError:
-            client = mqtt.Client(client_id="autocam_launcher_shutdown")
+        client = mqtt_client("autocam_launcher_shutdown")
         client.connect(host, port, keepalive=10)
         client.loop_start()
         result = client.publish(
@@ -230,6 +239,54 @@ def publish_shutdown_home() -> bool:
         return True
     except Exception as exc:
         print(f"[launcher] shutdown recenter failed detail={exc}", flush=True)
+        return False
+
+
+def publish_shutdown_node_pauses() -> bool:
+    if mqtt is None:
+        print("[launcher] shutdown node pauses skipped reason=paho_mqtt_missing", flush=True)
+        return False
+
+    nodes = [
+        node_id.strip()
+        for node_id in env_str("UWB_NODES", "").split(",")
+        if node_id.strip()
+    ]
+    if not nodes:
+        print("[launcher] shutdown node pauses skipped reason=no_nodes", flush=True)
+        return False
+
+    host = env_str("MQTT_HOST", "127.0.0.1")
+    port = env_int("MQTT_PORT", 1883)
+    qos = env_int("MQTT_QOS", 0)
+    cmd_topic_base = env_str("MQTT_CMD_TOPIC_BASE", "uwb/cmd")
+    try:
+        client = mqtt_client("autocam_launcher_pause_nodes")
+        client.connect(host, port, keepalive=10)
+        client.loop_start()
+        published = 0
+        for node_id in nodes:
+            topic = f"{cmd_topic_base}/{node_id}"
+            payload = {
+                "cmd": "pause",
+                "source": "launcher_shutdown",
+                "ts": time.time(),
+            }
+            result = client.publish(
+                topic,
+                json.dumps(payload, separators=(",", ":"), allow_nan=False),
+                qos=qos,
+                retain=False,
+            )
+            result.wait_for_publish(timeout=1.0)
+            published += 1
+            print(f"[launcher] shutdown pause published node={node_id} topic={topic}", flush=True)
+        client.loop_stop()
+        client.disconnect()
+        print(f"[launcher] shutdown node pauses published count={published}", flush=True)
+        return True
+    except Exception as exc:
+        print(f"[launcher] shutdown node pauses failed detail={exc}", flush=True)
         return False
 
 
@@ -349,6 +406,7 @@ def main() -> int:
         server_stop_event.set()
         if not args.skip_motor_controller:
             publish_shutdown_home()
+        publish_shutdown_node_pauses()
         terminate_all(processes)
         if server_thread is not None:
             server_thread.join(timeout=1.0)
