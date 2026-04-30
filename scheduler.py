@@ -42,6 +42,8 @@ def env_float(name: str, default: float) -> float:
 
 MQTT_HOST = env_str("MQTT_HOST", "127.0.0.1")
 MQTT_PORT = env_int("MQTT_PORT", 1883)
+MQTT_USERNAME = env_str("MQTT_USERNAME", "")
+MQTT_PASSWORD = env_str("MQTT_PASSWORD", "")
 MQTT_QOS = env_int("MQTT_QOS", 0)
 
 RAW_TOPIC = "uwb/raw/+"
@@ -51,7 +53,7 @@ TARGET_REQUEST_TOPIC = env_str("AUTOCAM_TARGET_REQUEST_TOPIC", "autocam/target/r
 PUBLISH_TARGET_SELECT = bool(env_int("SCHEDULER_PUBLISH_TARGET_SELECT", 0))
 RETAIN_TARGET_SELECT = bool(env_int("SCHEDULER_RETAIN_TARGET_SELECT", 1))
 SCHEDULER_MODE = env_str("SCHEDULER_MODE", "round_robin").strip().lower()
-if SCHEDULER_MODE not in {"round_robin", "audio_scene"}:
+if SCHEDULER_MODE not in {"round_robin", "audio_scene", "opera_scene"}:
     SCHEDULER_MODE = "round_robin"
 
 NODES = [
@@ -70,6 +72,27 @@ BURST_RESPONSE_TIMEOUT_S = env_float("BURST_RESPONSE_TIMEOUT_S", 0.75)
 BURST_POST_PAUSE_GRACE_S = env_float("BURST_POST_PAUSE_GRACE_S", 0.05)
 TARGET_REQUEST_MAX_AGE_S = env_float("TARGET_REQUEST_MAX_AGE_S", 10.0)
 CENTER_NODE_ID = "__center__"
+OPERA_OSC_HOST = env_str("OPERA_OSC_HOST", "0.0.0.0")
+OPERA_OSC_PORT = env_int("OPERA_OSC_PORT", 8000)
+OPERA_TARGET_MAP_TEXT = env_str("OPERA_TARGET_MAP", "singer1:rpi1,singer2:rpi2")
+OPERA_INITIAL_TARGET = env_str("OPERA_INITIAL_TARGET", "singer1").strip().lower()
+
+
+def parse_target_map(value: str) -> Dict[str, str]:
+    target_map: Dict[str, str] = {}
+    for part in value.replace(";", ",").split(","):
+        item = part.strip()
+        if not item:
+            continue
+        label, sep, node_id = item.partition(":")
+        label = label.strip().lower()
+        node_id = node_id.strip()
+        if sep and label and node_id:
+            target_map[label] = node_id
+    return target_map
+
+
+OPERA_TARGET_MAP = parse_target_map(OPERA_TARGET_MAP_TEXT)
 
 
 class RoundRobinScheduler:
@@ -85,6 +108,9 @@ class RoundRobinScheduler:
         self.target_requests: Deque[dict] = deque()
         self.current_audio_node: Optional[str] = None
         self.current_audio_token: Optional[str] = None
+        self.current_opera_label: Optional[str] = None
+        self.opera_osc_server = None
+        self.opera_osc_thread: Optional[threading.Thread] = None
 
         try:
             self.client = mqtt.Client(
@@ -93,6 +119,9 @@ class RoundRobinScheduler:
             )
         except AttributeError:
             self.client = mqtt.Client(client_id="central_scheduler")
+
+        if MQTT_USERNAME:
+            self.client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
 
         self.client.on_connect = self.on_connect
         self.client.on_message = self.on_message
@@ -192,6 +221,7 @@ class RoundRobinScheduler:
         self.running = False
         with self.cv:
             self.cv.notify_all()
+        self.stop_opera_osc_server()
         try:
             self.client.loop_stop()
         finally:
@@ -275,6 +305,11 @@ class RoundRobinScheduler:
             retain=False,
         )
 
+    def pause_all_nodes(self, *, reason: str) -> None:
+        for node_id in NODES:
+            self.publish_pause(node_id)
+            print(f"scheduler pause_all node={node_id} reason={reason}", flush=True)
+
     def wait_for_slot(self, node_id: str, token: str, timeout_s: float) -> Optional[dict]:
         deadline = time.monotonic() + timeout_s
         with self.cv:
@@ -304,13 +339,13 @@ class RoundRobinScheduler:
 
         return None
 
-    def pause_inactive_nodes(self, target_node_id: str) -> None:
+    def pause_inactive_nodes(self, target_node_id: str, *, log_prefix: str = "audio_scene") -> None:
         for node_id in NODES:
             if node_id == target_node_id:
                 continue
             self.publish_pause(node_id)
             print(
-                f"audio_scene pause_inactive node={node_id} target_node={target_node_id}",
+                f"{log_prefix} pause_inactive node={node_id} target_node={target_node_id}",
                 flush=True,
             )
 
@@ -347,7 +382,7 @@ class RoundRobinScheduler:
                 print(f"audio_scene home actor={actor or 'Center'}", flush=True)
                 continue
             if node_id == self.current_audio_node:
-                self.pause_inactive_nodes(node_id)
+                self.pause_inactive_nodes(node_id, log_prefix="audio_scene")
                 token = self.current_audio_token or self.next_token(node_id)
                 self.current_audio_token = token
                 self.publish_target_select(
@@ -370,7 +405,7 @@ class RoundRobinScheduler:
                     flush=True,
                 )
 
-            self.pause_inactive_nodes(node_id)
+            self.pause_inactive_nodes(node_id, log_prefix="audio_scene")
             token = self.next_token(node_id)
             self.current_audio_node = node_id
             self.current_audio_token = token
@@ -391,9 +426,202 @@ class RoundRobinScheduler:
                 flush=True,
             )
 
+    def resolve_opera_label(self, raw_label: object) -> Optional[dict]:
+        label = str(raw_label or "").strip().lower()
+        if not label:
+            print("opera_scene ignored reason=missing_label", flush=True)
+            return None
+
+        requested_label = label
+        if label == "both":
+            label = self.current_opera_label or OPERA_INITIAL_TARGET
+
+        node_id = OPERA_TARGET_MAP.get(label)
+        if not node_id:
+            print(
+                f"opera_scene ignored reason=unknown_label label={requested_label} "
+                f"resolved_label={label} map={OPERA_TARGET_MAP_TEXT}",
+                flush=True,
+            )
+            return None
+        if node_id not in NODES:
+            print(
+                f"opera_scene ignored reason=unknown_node label={requested_label} "
+                f"resolved_label={label} node={node_id} nodes={','.join(NODES)}",
+                flush=True,
+            )
+            return None
+
+        if requested_label != "both":
+            self.current_opera_label = label
+
+        return {
+            "node_id": node_id,
+            "actor": label,
+            "source": "osc" if requested_label == label else f"osc:{requested_label}",
+            "home": False,
+            "ts": time.time(),
+            "label": label,
+            "requested_label": requested_label,
+        }
+
+    def queue_opera_label(self, raw_label: object) -> None:
+        with self.cv:
+            request = self.resolve_opera_label(raw_label)
+            if request is None:
+                return
+            self.target_requests.append(request)
+            while len(self.target_requests) > TOKEN_RESPONSE_LIMIT:
+                self.target_requests.popleft()
+            self.cv.notify_all()
+        print(
+            f"opera_scene queued label={request['requested_label']} "
+            f"resolved_label={request['label']} node={request['node_id']}",
+            flush=True,
+        )
+
+    def start_opera_osc_server(self) -> None:
+        if self.opera_osc_server is not None:
+            return
+        try:
+            from pythonosc import dispatcher, osc_server
+        except ImportError as exc:
+            raise RuntimeError(
+                "python-osc is not installed. Install it with 'python -m pip install -r requirements.txt'."
+            ) from exc
+
+        osc_dispatcher = dispatcher.Dispatcher()
+
+        def handle_camera_next(address, *args) -> None:
+            label = args[0] if args else ""
+            self.queue_opera_label(label)
+
+        osc_dispatcher.map("/camera/next", handle_camera_next)
+        self.opera_osc_server = osc_server.ThreadingOSCUDPServer(
+            (OPERA_OSC_HOST, OPERA_OSC_PORT),
+            osc_dispatcher,
+        )
+        self.opera_osc_thread = threading.Thread(
+            target=self.opera_osc_server.serve_forever,
+            name="opera_scene_osc",
+            daemon=True,
+        )
+        self.opera_osc_thread.start()
+        print(
+            f"opera_scene osc_listening host={OPERA_OSC_HOST} port={OPERA_OSC_PORT} "
+            f"path=/camera/next map={OPERA_TARGET_MAP_TEXT}",
+            flush=True,
+        )
+
+    def stop_opera_osc_server(self) -> None:
+        server = self.opera_osc_server
+        if server is None:
+            return
+        try:
+            server.shutdown()
+            server.server_close()
+        except Exception as exc:
+            print(f"opera_scene osc_stop_error detail={exc}", flush=True)
+        self.opera_osc_server = None
+        thread = self.opera_osc_thread
+        self.opera_osc_thread = None
+        if thread is not None:
+            thread.join(timeout=1.0)
+
+    def validate_opera_config(self) -> None:
+        if not OPERA_TARGET_MAP:
+            raise RuntimeError("opera_scene target map is empty; set OPERA_TARGET_MAP=singer1:rpi1,singer2:rpi2")
+        initial_node_id = OPERA_TARGET_MAP.get(OPERA_INITIAL_TARGET)
+        if not initial_node_id:
+            raise RuntimeError(
+                f"opera_scene initial target {OPERA_INITIAL_TARGET!r} is not in OPERA_TARGET_MAP={OPERA_TARGET_MAP_TEXT!r}"
+            )
+        if initial_node_id not in NODES:
+            raise RuntimeError(
+                f"opera_scene initial target {OPERA_INITIAL_TARGET!r} maps to node {initial_node_id!r}, "
+                f"which is not in UWB_NODES={','.join(NODES)!r}"
+            )
+
+    def safe_home_for_opera_config_error(self, detail: str) -> None:
+        for node_id in NODES:
+            self.publish_pause(node_id)
+        self.current_audio_node = None
+        self.current_audio_token = None
+        self.publish_home_select(actor="Center", source="scheduler_opera_scene_config_error")
+        print(f"opera_scene config_error_safe_home detail={detail}", flush=True)
+
+    def run_opera_scene(self) -> None:
+        print(
+            f"opera_scene start initial_target={OPERA_INITIAL_TARGET} "
+            f"osc={OPERA_OSC_HOST}:{OPERA_OSC_PORT}",
+            flush=True,
+        )
+        try:
+            self.validate_opera_config()
+        except RuntimeError as exc:
+            self.safe_home_for_opera_config_error(str(exc))
+            raise
+        self.start_opera_osc_server()
+        self.queue_opera_label(OPERA_INITIAL_TARGET)
+
+        while self.running:
+            request = self.wait_for_target_request()
+            if request is None:
+                continue
+
+            node_id = request["node_id"]
+            actor = request.get("actor") or ""
+            if node_id == self.current_audio_node:
+                self.pause_inactive_nodes(node_id, log_prefix="opera_scene")
+                token = self.current_audio_token or self.next_token(node_id)
+                self.current_audio_token = token
+                self.publish_target_select(
+                    node_id,
+                    token,
+                    actor=actor,
+                    source="scheduler_opera_scene",
+                )
+                print(
+                    f"opera_scene keep node={node_id} actor={actor or '-'} token={token}",
+                    flush=True,
+                )
+                continue
+
+            if self.current_audio_node is not None:
+                self.publish_pause(self.current_audio_node)
+                print(
+                    f"opera_scene pause node={self.current_audio_node} "
+                    f"next_node={node_id} actor={actor or '-'}",
+                    flush=True,
+                )
+
+            self.pause_inactive_nodes(node_id, log_prefix="opera_scene")
+            token = self.next_token(node_id)
+            self.current_audio_node = node_id
+            self.current_audio_token = token
+            self.publish_activate(
+                node_id,
+                token,
+                continuous=True,
+                publish_select=False,
+            )
+            self.publish_target_select(
+                node_id,
+                token,
+                actor=actor,
+                source="scheduler_opera_scene",
+            )
+            print(
+                f"opera_scene activate node={node_id} actor={actor or '-'} token={token}",
+                flush=True,
+            )
+
     def run(self) -> None:
         if SCHEDULER_MODE == "audio_scene":
             self.run_audio_scene()
+            return
+        if SCHEDULER_MODE == "opera_scene":
+            self.run_opera_scene()
             return
 
         if SINGLE_NODE_MODE:
@@ -512,7 +740,9 @@ def main() -> None:
         f"publish_target_select={PUBLISH_TARGET_SELECT} "
         f"retain_target_select={RETAIN_TARGET_SELECT} "
         f"timeout_skip={TIMEOUT_SKIP_THRESHOLD} "
-        f"cooldown={TIMEOUT_COOLDOWN_S:.2f}s",
+        f"cooldown={TIMEOUT_COOLDOWN_S:.2f}s "
+        f"opera_osc={OPERA_OSC_HOST}:{OPERA_OSC_PORT} "
+        f"opera_initial={OPERA_INITIAL_TARGET}",
         flush=True,
     )
     scheduler.start()
@@ -521,6 +751,7 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        scheduler.pause_all_nodes(reason="shutdown")
         scheduler.stop()
 
 

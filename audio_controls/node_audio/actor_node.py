@@ -5,10 +5,9 @@ import sounddevice as sd
 import zmq
 from vosk import Model, KaldiRecognizer
 
-# ── CONFIGURE THESE TWO LINES PER PI ──────────────────────────────────────────
+# Configure these two lines per Pi.
 ACTOR_NAME = "Nora"          # Change to "Torvald" on the other Pi
 CENTRAL_IP = "172.26.160.17"  # Replace with your central Pi's IP address
-# ──────────────────────────────────────────────────────────────────────────────
 
 SAMPLE_RATE = 48000
 VOSK_RATE = 16000
@@ -31,7 +30,6 @@ def audio_callback(indata, frames, time, status):
 
 
 # Check mic device
-import sounddevice as sd
 devices = sd.query_devices()
 print("Available audio devices:")
 print(devices)
